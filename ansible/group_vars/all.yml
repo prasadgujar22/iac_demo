@@ -1,0 +1,64 @@
+---
+# ===========================================================================
+# Shared configuration for the homelab stack
+# ===========================================================================
+
+# --- Application -----------------------------------------------------------
+app_name:         customer-onboarding
+app_context_root: /customer-onboarding
+app_repo:         https://github.com/prasadgujar22/java_session_management_demo.git
+app_repo_version: main
+app_build_dir:    /tmp/homelab-iac-build
+app_war_name:     "{{ app_name }}.war"
+
+app_login_username: admin
+app_login_password: welcome1
+
+# --- Database mode ---------------------------------------------------------
+# oracle : Oracle XE on Multipass, shared by both managed servers
+# h2     : embedded in-memory H2 - per-pod dataset, no external dependency
+#
+# H2 is a valid fallback but NOT equivalent: each managed server gets its own
+# dataset, so a record written via ms1 is invisible to a session pinned to ms2.
+db_mode: oracle
+
+oracle_pdb:      XEPDB1
+oracle_app_user: customer_app
+oracle_listener_port: 1521
+
+h2_jdbc_url: "jdbc:h2:mem:customer_onboarding;DB_CLOSE_DELAY=-1"
+h2_user:     sa
+h2_password: ""
+
+# --- WebLogic --------------------------------------------------------------
+wls_namespace:   wls-domain
+wls_domain_uid:  wlsdomain
+wls_domain_home: /u01/domains/wls_domain
+wls_cluster_name: WLSCluster
+wls_ms_listen_port: 7003
+wls_admin_nodeport: 30070
+
+# --- Networking ------------------------------------------------------------
+# enp0s31f6 is the host's ONLY LAN path. Roles must only ever ADD secondary
+# addresses to it and must never modify primary_ip.
+primary_nic: enp0s31f6
+primary_ip:  192.168.29.159
+
+k8s_master_ip: 10.2.243.69
+
+# Each managed server is published on its own LAN address so nginx can route by
+# WebLogic JVM route ID for session affinity.
+managed_servers:
+  - name: ms1
+    nodeport: 30701
+    lan_ip: 192.168.29.201
+    lan_port: 8090
+  - name: ms2
+    nodeport: 30702
+    lan_ip: 192.168.29.202
+    lan_port: 8090
+
+# --- nginx proxy -----------------------------------------------------------
+proxy_lan_ip:      192.168.29.200
+proxy_listen_port: 80
+proxy_internal_ip: 10.184.135.2

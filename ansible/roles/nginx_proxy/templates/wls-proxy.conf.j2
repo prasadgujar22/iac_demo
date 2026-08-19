@@ -1,0 +1,103 @@
+##
+## {{ ansible_managed }}
+##
+## Reverse proxy for {{ app_name }} on the WebLogic cluster.
+## Session affinity by WebLogic JVM ROUTE ID -- not by hashing.
+##
+## Why not `hash $cookie_jsessionid consistent`:
+## on the FIRST request no cookie exists, so the hash key must fall back to
+## something else ($remote_addr). The key therefore CHANGES between request 1
+## (GET login) and request 2 (POST credentials), and consistent hashing then
+## picks a DIFFERENT backend roughly half the time. The session created on
+## server A is unknown to server B, so the user is bounced back to the login
+## page. Measured: 4 failed logins in 10 before switching to route IDs.
+##
+## Route IDs discovered at deploy time:
+{% for r in wls_routes %}
+##   {{ r.name }} ({{ r.lan_ip }}:{{ r.lan_port }}) -> {{ r.route_id }}
+{% endfor %}
+##
+
+# Map the cookie's route-ID suffix to the upstream that owns the session.
+# The (!|$) anchor matters: a replicated session appends a SECONDARY JVM ID
+# (!primary!secondary), and matching the primary must still work.
+map $cookie_jsessionid $wls_route {
+    default {{ ' ' * 18 }}wls_balanced;
+{% for r in wls_routes %}
+    "~{{ r.route_id }}(!|$)" wls_{{ r.name }};
+{% endfor %}
+}
+
+map $cookie_jsessionid $wls_route_reason {
+    default {{ ' ' * 18 }}"new-session:balanced";
+{% for r in wls_routes %}
+    "~{{ r.route_id }}(!|$)" "pinned:{{ r.name }}";
+{% endfor %}
+}
+
+{% for r in wls_routes %}
+# {{ r.name }} owns sessions tagged {{ r.route_id }}. Peers are listed as
+# `backup` so a dead owner still serves the app rather than returning 502.
+upstream wls_{{ r.name }} {
+    server {{ r.lan_ip }}:{{ r.lan_port }} max_fails=2 fail_timeout=10s;
+{% for peer in wls_routes if peer.name != r.name %}
+    server {{ peer.lan_ip }}:{{ peer.lan_port }} backup;
+{% endfor %}
+}
+
+{% endfor %}
+# Used only for requests that carry no JSESSIONID yet.
+upstream wls_balanced {
+{% for r in wls_routes %}
+    server {{ r.lan_ip }}:{{ r.lan_port }} max_fails=2 fail_timeout=10s;
+{% endfor %}
+}
+
+server {
+    listen {{ proxy_listen_port }} default_server;
+    server_name _;
+
+    access_log /var/log/nginx/wls-proxy.access.log;
+    error_log  /var/log/nginx/wls-proxy.error.log;
+
+    location = / {
+        return 302 {{ app_context_root }}/;
+    }
+
+    location = /proxy-health {
+        add_header Content-Type text/plain always;
+        return 200 "nginx wls reverse proxy: OK\n";
+    }
+
+    location {{ app_context_root }}/ {
+        proxy_pass http://$wls_route;
+
+        # $http_host preserves host:port so WebLogic builds redirects pointing at
+        # the proxy. $host drops the port and produces broken redirects.
+        proxy_set_header Host              $http_host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-Host  $http_host;
+
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
+
+        # Never rewrite the session cookie -- its suffix IS the routing key.
+        proxy_cookie_path off;
+        proxy_redirect    off;
+
+        proxy_connect_timeout 10s;
+        proxy_send_timeout    60s;
+        proxy_read_timeout    60s;
+
+        proxy_next_upstream error timeout http_502 http_503 http_504;
+        proxy_next_upstream_tries 2;
+
+        # Make routing decisions observable; without these you cannot prove
+        # affinity works or diagnose it when it breaks.
+        add_header X-Upstream-Server $upstream_addr    always;
+        add_header X-Route-Decision  $wls_route_reason always;
+        add_header X-Upstream-Status $upstream_status  always;
+    }
+}

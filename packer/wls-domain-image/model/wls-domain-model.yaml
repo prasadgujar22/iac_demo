@@ -1,0 +1,56 @@
+#
+# WebLogic Deploy Tooling model — topology only.
+#
+# DELIBERATELY CONTAINS NO resources.JDBCSystemResource SECTION.
+#
+# A datasource declared here is instantiated on every pod start. If its database
+# is unreachable, WebLogic reports:
+#     BEA-149205 Failed to initialize the application "OracleDS"
+#     BEA-149259 Server "ms1" ... brought up in administration state
+# and NO application can deploy. The application manages its own JDBC pool and
+# reads connection details from environment/config instead, so a database outage
+# degrades one feature rather than the entire domain.
+#
+domainInfo:
+    AdminUserName: '@@PROP:admin.username@@'
+    AdminPassword: '@@PROP:admin.password@@'
+    ServerStartMode: 'prod'
+
+topology:
+    Name: '@@PROP:domain.name@@'
+    ProductionModeEnabled: true
+
+    AdminServerName: 'AdminServer'
+    Server:
+        'AdminServer':
+            ListenPort: 7001
+            ServerStart:
+                Arguments: '-Xms1024m -Xmx1536m'
+
+    Cluster:
+        '@@PROP:cluster.name@@':
+            ClientCertProxyEnabled: false
+            # Unicast messaging: multicast is unreliable across CNI overlays.
+            ClusterMessagingMode: 'unicast'
+
+    ServerTemplate:
+        'wls-template':
+            ListenPort: 7003
+            Cluster: '@@PROP:cluster.name@@'
+            ServerStart:
+                Arguments: '-Xms1024m -Xmx1536m'
+
+    DynamicCluster:
+        '@@PROP:cluster.name@@':
+            ServerTemplate: 'wls-template'
+            DynamicClusterSize: '@@PROP:cluster.size@@'
+            CalculatedListenPorts: false
+            ServerNamePrefix: 'ms'
+
+    SecurityConfiguration:
+        NodeManagerUsername: '@@PROP:admin.username@@'
+        NodeManagerPasswordEncrypted: '@@PROP:admin.password@@'
+
+appDeployments:
+    # The application WAR is deployed by Ansible/Jenkins after the domain is
+    # healthy, NOT baked in — so an app change does not require an image rebuild.

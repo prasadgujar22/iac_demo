@@ -1,0 +1,44 @@
+---
+# Application-only redeploy: rebuild the WAR, redeploy, refresh nginx routing and
+# re-verify. Does not touch provisioning. This is the fast inner loop.
+- name: Load database facts
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tags: [always]
+  tasks:
+    - name: Read the database stack's generated inventory
+      ansible.builtin.include_vars:
+        file: "{{ playbook_dir }}/../terraform/10-db-multipass/.generated/db_inventory.yaml"
+        name: db_tf
+      failed_when: false
+      register: db_tf_load
+
+    - name: Derive the database host
+      ansible.builtin.set_fact:
+        oracle_db_host: >-
+          {{ (db_tf.db.hosts.values() | list | first).ansible_host
+             if db_tf_load is succeeded and db_tf is defined
+             else (oracle_db_host | default('')) }}
+
+- name: Build and deploy the application
+  hosts: control
+  gather_facts: false
+  vars:
+    oracle_db_host: "{{ hostvars['localhost']['oracle_db_host'] | default('') }}"
+  roles:
+    - app_deploy
+
+- name: Refresh nginx routing
+  # Route IDs change after a domain rebuild, so the proxy must be re-templated
+  # whenever the application or domain is redeployed.
+  hosts: nginx
+  gather_facts: true
+  roles:
+    - nginx_proxy
+
+- name: Verify
+  hosts: control
+  gather_facts: false
+  roles:
+    - verify

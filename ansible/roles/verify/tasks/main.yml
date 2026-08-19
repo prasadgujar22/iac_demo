@@ -1,0 +1,156 @@
+---
+# End-to-end verification. Every assertion is a real HTTP interaction against
+# live infrastructure -- nothing is inferred from "the deploy command exited 0".
+
+- name: Proxy health endpoint responds
+  ansible.builtin.uri:
+    url: "http://{{ proxy_lan_ip }}:{{ proxy_listen_port }}/proxy-health"
+    return_content: true
+    timeout: 10
+  register: health
+  retries: 6
+  delay: 5
+  until: health is succeeded
+  failed_when: "'OK' not in health.content"
+  changed_when: false
+
+- name: Each managed server serves the login page directly
+  ansible.builtin.uri:
+    url: "http://{{ item.lan_ip }}:{{ item.lan_port }}{{ app_context_root }}/login"
+    return_content: true
+    timeout: 15
+  register: direct
+  failed_when: "'Customer Onboarding' not in direct.content"
+  loop: "{{ managed_servers }}"
+  loop_control:
+    label: "{{ item.name }}"
+  changed_when: false
+
+- name: Login page is served through the proxy
+  ansible.builtin.uri:
+    url: "http://{{ proxy_lan_ip }}:{{ proxy_listen_port }}{{ app_context_root }}/login"
+    return_content: true
+    timeout: 15
+  register: proxy_login
+  failed_when: "'Customer Onboarding' not in proxy_login.content"
+  changed_when: false
+
+- name: Dashboard renders without a database error banner
+  # A dashboard can return HTTP 200 while displaying "Database connection issue"
+  # in the body, so the status code alone proves nothing.
+  ansible.builtin.shell:
+    cmd: |
+      set -uo pipefail
+      J=$(mktemp)
+      BASE="http://{{ proxy_lan_ip }}:{{ proxy_listen_port }}{{ app_context_root }}"
+      curl -s -m 15 -c "$J" -o /dev/null "$BASE/login"
+      curl -s -m 15 -b "$J" -c "$J" -o /dev/null -X POST \
+        -d "username={{ app_login_username }}&password={{ app_login_password }}" "$BASE/login"
+      BODY=$(curl -s -m 20 -b "$J" "$BASE/dashboard")
+      rm -f "$J"
+      if echo "$BODY" | grep -qi "Database connection issue"; then
+        echo "FAIL: database error banner present"
+        echo "$BODY" | grep -io "Database connection issue[^<]*" | head -1
+        exit 1
+      fi
+      echo "$BODY" | grep -q "Customer Onboarding Dashboard" || { echo "FAIL: dashboard did not render"; exit 1; }
+      echo "PASS: dashboard clean"
+  register: dash
+  changed_when: false
+
+- name: Session affinity holds across the login handover
+  # THE test that catches broken affinity. A single manual login can pass by
+  # luck; the failure mode is that the backend CHANGES between the GET and the
+  # POST, so the session created on one server is unknown to the other and the
+  # user is bounced back to the login page. Repeat to expose it.
+  ansible.builtin.shell:
+    cmd: |
+      set -uo pipefail
+      BASE="http://{{ proxy_lan_ip }}:{{ proxy_listen_port }}{{ app_context_root }}"
+      FAIL=0
+      for i in $(seq 1 {{ verify_affinity_iterations }}); do
+        J=$(mktemp)
+        A=$(curl -s -D - -o /dev/null -m 15 -c "$J" "$BASE/login" \
+            | grep -i X-Upstream-Server | tr -d '\r' | awk '{print $2}')
+        B=$(curl -s -D - -o /dev/null -m 15 -b "$J" -c "$J" -X POST \
+            -d "username={{ app_login_username }}&password={{ app_login_password }}" "$BASE/login" \
+            | grep -i X-Upstream-Server | tr -d '\r' | awk '{print $2}')
+        LOC=$(curl -s -D - -o /dev/null -m 15 -b "$J" "$BASE/dashboard" \
+            | grep -i "^Location" | tr -d '\r' | awk '{print $2}')
+        rm -f "$J"
+        if [ -n "$LOC" ]; then
+          echo "iteration $i: BOUNCED to login (get=$A post=$B)"
+          FAIL=$((FAIL+1))
+        fi
+      done
+      if [ "$FAIL" -gt 0 ]; then
+        echo "FAIL: $FAIL of {{ verify_affinity_iterations }} logins bounced - affinity is broken"
+        exit 1
+      fi
+      echo "PASS: 0 of {{ verify_affinity_iterations }} logins bounced"
+  register: affinity
+  changed_when: false
+
+- name: New sessions are distributed across managed servers
+  # Affinity must not collapse into pinning everything to one server.
+  ansible.builtin.shell:
+    cmd: |
+      set -uo pipefail
+      BASE="http://{{ proxy_lan_ip }}:{{ proxy_listen_port }}{{ app_context_root }}"
+      for i in $(seq 1 {{ verify_distribution_iterations }}); do
+        J=$(mktemp)
+        curl -s -m 12 -c "$J" -o /dev/null "$BASE/login"
+        curl -s -D - -o /dev/null -m 12 -b "$J" "$BASE/login" \
+          | grep -i X-Upstream-Server | tr -d '\r' | awk '{print $2}'
+        rm -f "$J"
+      done | sort | uniq -c | tee /tmp/dist.txt
+      SERVERS=$(wc -l < /tmp/dist.txt)
+      rm -f /tmp/dist.txt
+      if [ "$SERVERS" -lt 2 ]; then
+        echo "FAIL: all new sessions landed on one server"
+        exit 1
+      fi
+      echo "PASS: sessions spread across $SERVERS servers"
+  register: distribution
+  changed_when: false
+
+- name: Write-then-read round trip through the proxy
+  # The only way to prove the database path actually works end to end.
+  ansible.builtin.shell:
+    cmd: |
+      set -uo pipefail
+      BASE="http://{{ proxy_lan_ip }}:{{ proxy_listen_port }}{{ app_context_root }}"
+      MARKER="IaC-Verify-{{ 999999 | random }}"
+      J=$(mktemp)
+      curl -s -m 15 -c "$J" -o /dev/null "$BASE/login"
+      curl -s -m 15 -b "$J" -c "$J" -o /dev/null -X POST \
+        -d "username={{ app_login_username }}&password={{ app_login_password }}" "$BASE/login"
+      curl -s -m 20 -b "$J" -c "$J" -o /dev/null -X POST "$BASE/customers" \
+        --data-urlencode "customerName=$MARKER" \
+        --data-urlencode "companyName=IaC Pipeline" \
+        --data-urlencode "email=verify@example.com" \
+        --data-urlencode "onboardingStatus=SUBMITTED" \
+        --data-urlencode "country=USA"
+      OUT=$(curl -s -m 20 -b "$J" "$BASE/dashboard?tab=reports")
+      rm -f "$J"
+      if echo "$OUT" | grep -q "$MARKER"; then
+        echo "PASS: wrote and read back $MARKER"
+      else
+        echo "FAIL: $MARKER not found after write"
+        exit 1
+      fi
+  register: roundtrip
+  changed_when: false
+
+- name: Verification summary
+  ansible.builtin.debug:
+    msg:
+      - "proxy health ......... {{ 'PASS' if health is succeeded else 'FAIL' }}"
+      - "direct endpoints ..... PASS ({{ managed_servers | length }} servers)"
+      - "proxy login page ..... PASS"
+      - "dashboard clean ...... {{ dash.stdout_lines | last }}"
+      - "session affinity ..... {{ affinity.stdout_lines | last }}"
+      - "distribution ......... {{ distribution.stdout_lines | last }}"
+      - "write/read round trip  {{ roundtrip.stdout_lines | last }}"
+      - ""
+      - "APPLICATION URL: http://{{ proxy_lan_ip }}:{{ proxy_listen_port }}{{ app_context_root }}/login"

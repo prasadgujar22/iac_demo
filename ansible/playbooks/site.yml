@@ -1,0 +1,75 @@
+---
+# Full stack configuration. Terraform provisions; Ansible configures.
+#
+# Run order matters: the database must be reachable before the app is deployed,
+# the app must be deployed before nginx can discover JVM route IDs, and the LAN
+# bridges must exist before anything can be probed.
+
+- name: Load Terraform outputs as facts
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tags: [always]
+  tasks:
+    - name: Read the database stack's generated inventory
+      ansible.builtin.include_vars:
+        file: "{{ playbook_dir }}/../terraform/10-db-multipass/.generated/db_inventory.yaml"
+        name: db_tf
+      failed_when: false
+      register: db_tf_load
+
+    - name: Derive the database host
+      ansible.builtin.set_fact:
+        oracle_db_host: >-
+          {{ (db_tf.db.hosts.values() | list | first).ansible_host
+             if db_tf_load is succeeded and db_tf is defined
+             else (oracle_db_host | default('')) }}
+      when: db_mode == 'oracle'
+
+    - name: Require a database host when running in oracle mode
+      ansible.builtin.assert:
+        that:
+          - oracle_db_host is defined
+          - oracle_db_host | length > 0
+        fail_msg: >-
+          db_mode=oracle but no database host is known. Apply
+          terraform/10-db-multipass first, or run with -e db_mode=h2.
+      when: db_mode == 'oracle'
+
+- name: Configure the Oracle XE database tier
+  hosts: db
+  gather_facts: true
+  tags: [db]
+  roles:
+    - role: oracle_xe
+      when: db_mode == 'oracle'
+
+- name: Publish managed servers on the LAN
+  hosts: control
+  gather_facts: true
+  tags: [network, bridge]
+  roles:
+    - lan_bridge
+
+- name: Build and deploy the application
+  hosts: control
+  gather_facts: false
+  tags: [app, deploy]
+  vars:
+    oracle_db_host: "{{ hostvars['localhost']['oracle_db_host'] | default('') }}"
+  roles:
+    - app_deploy
+
+- name: Configure the nginx reverse proxy
+  hosts: nginx
+  gather_facts: true
+  tags: [proxy, nginx]
+  roles:
+    - nginx_proxy
+
+- name: Verify the whole stack end to end
+  hosts: control
+  gather_facts: false
+  tags: [verify]
+  roles:
+    - verify

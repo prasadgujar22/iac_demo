@@ -1,0 +1,72 @@
+---
+# Publish k8s NodePorts on the physical LAN via socat, supervised by systemd.
+#
+# Multipass VMs sit on a NAT'd network (10.2.243.0/24) that nothing outside the
+# host can route into, so NodePorts are not LAN-reachable. Secondary addresses on
+# the primary NIC plus socat bridge the gap.
+
+- name: Assert the primary NIC still holds its address
+  # This NIC is the host's only LAN path. If it looks wrong, stop immediately
+  # rather than risk touching networking.
+  ansible.builtin.assert:
+    that:
+      - ansible_facts['all_ipv4_addresses'] is defined
+      - primary_ip in ansible_facts['all_ipv4_addresses']
+    fail_msg: >-
+      {{ primary_ip }} not found on this host. Refusing to modify networking:
+      {{ primary_nic }} is the only LAN path.
+    success_msg: "primary NIC holds {{ primary_ip }}"
+
+- name: Install socat
+  ansible.builtin.apt:
+    name: socat
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+  become: true
+
+- name: Deploy the LAN forward supervisor script
+  ansible.builtin.template:
+    src: lan-forward.sh.j2
+    dest: /usr/local/sbin/wls-lan-forward.sh
+    owner: root
+    group: root
+    mode: "0755"
+  become: true
+  notify: restart lan forward
+
+- name: Install the systemd unit
+  ansible.builtin.template:
+    src: wls-lan-forward.service.j2
+    dest: /etc/systemd/system/wls-lan-forward.service
+    owner: root
+    group: root
+    mode: "0644"
+  become: true
+  notify:
+    - reload systemd
+    - restart lan forward
+
+- name: Enable and start the LAN forward service
+  ansible.builtin.systemd:
+    name: wls-lan-forward.service
+    enabled: true
+    state: started
+    daemon_reload: true
+  become: true
+
+- name: Wait for each managed server endpoint to answer on the LAN
+  ansible.builtin.uri:
+    url: "http://{{ item.lan_ip }}:{{ item.lan_port }}{{ app_context_root }}/login"
+    method: GET
+    status_code: [200, 302, 404]
+    timeout: 10
+  register: lan_probe
+  retries: 12
+  delay: 5
+  until: lan_probe is succeeded
+  loop: "{{ managed_servers }}"
+  loop_control:
+    label: "{{ item.name }} -> {{ item.lan_ip }}:{{ item.lan_port }}"
+  # A 404 still proves the bridge works; the app may simply not be deployed yet.
+  changed_when: false

@@ -1,0 +1,156 @@
+---
+# Build the application WAR and deploy it to the WebLogic cluster.
+#
+# Two upstream application bugs are patched here rather than forked, so the
+# repository stays the source of truth:
+#
+#  1. The schema initialiser emits an Oracle PL/SQL anonymous block, which H2
+#     cannot parse (H2 error 42000-224). Made dialect-aware.
+#  2. DriverManager cannot see JDBC drivers in WEB-INF/lib because it is loaded
+#     by the SYSTEM classloader, so its ServiceLoader scan misses the webapp.
+#     Symptom: "No suitable driver found" despite the jar being present.
+#     Fixed with an explicit Class.forName plus a direct Driver.connect fallback.
+
+- name: Ensure build directory exists
+  ansible.builtin.file:
+    path: "{{ app_build_dir }}"
+    state: directory
+    mode: "0755"
+
+- name: Clone or update the application repository
+  ansible.builtin.git:
+    repo: "{{ app_repo }}"
+    dest: "{{ app_build_dir }}/src"
+    version: "{{ app_repo_version }}"
+    force: true
+  register: app_checkout
+
+- name: Apply the dialect-aware schema initialiser patch
+  ansible.builtin.copy:
+    src: CustomerDao.java
+    dest: "{{ app_build_dir }}/src/src/main/java/com/example/onboarding/dao/CustomerDao.java"
+    mode: "0644"
+  register: dao_patch
+
+- name: Apply the JDBC driver classloader patch
+  ansible.builtin.copy:
+    src: ConnectionManager.java
+    dest: "{{ app_build_dir }}/src/src/main/java/com/example/onboarding/util/ConnectionManager.java"
+    mode: "0644"
+  register: cm_patch
+
+- name: Ensure the required JDBC driver is a dependency
+  # H2 for embedded mode, ojdbc11 for Oracle. Both are declared so db_mode can be
+  # switched without editing the build.
+  ansible.builtin.blockinfile:
+    path: "{{ app_build_dir }}/src/pom.xml"
+    marker: "        <!-- {mark} ANSIBLE MANAGED: jdbc drivers -->"
+    insertbefore: "    </dependencies>"
+    block: |
+      <dependency>
+          <groupId>com.h2database</groupId>
+          <artifactId>h2</artifactId>
+          <version>{{ h2_version }}</version>
+      </dependency>
+  register: pom_patch
+
+- name: Render web.xml with the selected database mode
+  ansible.builtin.template:
+    src: web.xml.j2
+    dest: "{{ app_build_dir }}/src/src/main/webapp/WEB-INF/web.xml"
+    mode: "0644"
+  register: webxml
+
+- name: Build the WAR
+  ansible.builtin.command:
+    cmd: mvn -q -B clean package
+    chdir: "{{ app_build_dir }}/src"
+  register: mvn_build
+  changed_when: true
+
+- name: Confirm the WAR was produced
+  ansible.builtin.stat:
+    path: "{{ app_build_dir }}/src/target/{{ app_war_name }}"
+  register: war_file
+
+- name: Fail if the WAR is missing
+  ansible.builtin.assert:
+    that:
+      - war_file.stat.exists
+      - war_file.stat.size > 1000000
+    fail_msg: "Build did not produce a usable {{ app_war_name }}."
+
+- name: Verify the JDBC driver jar is packaged inside the WAR
+  # Catches the "No suitable driver found" class of failure before deployment.
+  ansible.builtin.shell:
+    cmd: "unzip -l {{ app_build_dir }}/src/target/{{ app_war_name }} | grep -E 'WEB-INF/lib/(h2|ojdbc)'"
+  register: war_drivers
+  changed_when: false
+
+- name: Assert the admin server pod is available
+  ansible.builtin.command:
+    cmd: >-
+      kubectl get pod {{ wls_domain_uid }}-adminserver
+      -n {{ wls_namespace }} -o jsonpath={.status.phase}
+  register: admin_pod
+  changed_when: false
+  failed_when: admin_pod.stdout != "Running"
+
+- name: Assert every managed server is in RUNNING mode (not ADMIN)
+  # A server in ADMIN mode accepts a deployment that then never activates.
+  # Pod readiness alone is NOT proof of RUNNING mode.
+  ansible.builtin.command:
+    cmd: >-
+      kubectl get domain {{ wls_domain_uid }} -n {{ wls_namespace }}
+      -o jsonpath={.status.servers[?(@.serverName=='{{ item.name }}')].state}
+  register: ms_state
+  changed_when: false
+  failed_when: "'RUNNING' not in ms_state.stdout"
+  retries: 20
+  delay: 15
+  until: "'RUNNING' in ms_state.stdout"
+  loop: "{{ managed_servers }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Stage the WAR inside the admin server pod
+  ansible.builtin.shell:
+    cmd: |
+      set -euo pipefail
+      kubectl exec -n {{ wls_namespace }} {{ wls_domain_uid }}-adminserver -- \
+        mkdir -p {{ wls_domain_home }}/applications
+      kubectl cp {{ app_build_dir }}/src/target/{{ app_war_name }} \
+        {{ wls_namespace }}/{{ wls_domain_uid }}-adminserver:{{ wls_domain_home }}/applications/{{ app_war_name }}
+      # kubectl cp fails silently if the target directory does not exist, so
+      # verify the file actually landed.
+      kubectl exec -n {{ wls_namespace }} {{ wls_domain_uid }}-adminserver -- \
+        test -s {{ wls_domain_home }}/applications/{{ app_war_name }}
+  changed_when: true
+
+- name: Stage the WLST deployment script
+  ansible.builtin.template:
+    src: deploy.py.j2
+    dest: "{{ app_build_dir }}/deploy.py"
+    mode: "0644"
+
+- name: Copy the WLST script into the pod
+  ansible.builtin.command:
+    cmd: >-
+      kubectl cp {{ app_build_dir }}/deploy.py
+      {{ wls_namespace }}/{{ wls_domain_uid }}-adminserver:/tmp/deploy.py
+  changed_when: true
+
+- name: Redeploy the application via WLST
+  # Undeploy-then-deploy: deploying over an existing app can serve stale classes.
+  ansible.builtin.shell:
+    cmd: |
+      set -uo pipefail
+      PASS=$(kubectl get secret {{ wls_domain_uid }}-weblogic-credentials \
+             -n {{ wls_namespace }} -o jsonpath='{.data.password}' | base64 -d)
+      kubectl exec -n {{ wls_namespace }} {{ wls_domain_uid }}-adminserver -- \
+        env ADMIN_PASS="$PASS" \
+        /u01/oracle/oracle_common/common/bin/wlst.sh /tmp/deploy.py
+  register: wlst_deploy
+  changed_when: "'Deployment successful' in wlst_deploy.stdout"
+  failed_when: "'Deployment successful' not in wlst_deploy.stdout"
+  no_log: false          # stdout carries no secret; ADMIN_PASS is not echoed

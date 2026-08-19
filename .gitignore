@@ -1,0 +1,49 @@
+# Terraform
+**/.terraform/*
+*.tfstate
+*.tfstate.*
+crash.log
+crash.*.log
+*.tfvars
+!example.tfvars
+override.tf
+override.tf.json
+*_override.tf
+.terraformrc
+terraform.rc
+.terraform.lock.hcl
+
+# Packer
+packer_cache/
+*.box
+manifest.json
+
+# Ansible
+*.retry
+ansible/.vault_pass
+ansible/inventory/host_vars/**/vault.yml
+ansible/fetched/
+
+# Secrets — never commit
+secrets/
+*.pem
+*.key
+!**/*.pub
+.env
+credentials.yml
+
+# Build artifacts
+target/
+*.war
+*.jar
+build/
+
+# Editors / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# Local scratch
+tmp/
+*.log

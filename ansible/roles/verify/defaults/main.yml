@@ -1,0 +1,4 @@
+---
+# 10 iterations reliably exposed a 4-in-10 affinity failure; fewer can pass by luck.
+verify_affinity_iterations: 10
+verify_distribution_iterations: 10

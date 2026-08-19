@@ -1,0 +1,15 @@
+# {{ ansible_managed }}
+[Unit]
+Description=WebLogic managed-server LAN forwards (socat -> k8s NodePorts)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/wls-lan-forward.sh
+Restart=always
+RestartSec=10s
+TimeoutStopSec=20s
+
+[Install]
+WantedBy=multi-user.target

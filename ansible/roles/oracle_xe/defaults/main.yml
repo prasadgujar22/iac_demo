@@ -1,0 +1,13 @@
+---
+oracle_home: /opt/oracle/product/21c/dbhomeXE
+oracle_pdb: XEPDB1
+oracle_listener_port: 1521
+oracle_app_user: customer_app
+
+# Oracle XE 21c RPM. Requires accepting Oracle's licence terms.
+oracle_xe_rpm_url: >-
+  https://download.oracle.com/otn-pub/otn_software/db-express/oracle-database-xe-21c-1.0-1.ol8.x86_64.rpm
+
+# Passwords MUST be supplied at run time (Jenkins credentials / vault / -e).
+# Deliberately undefined so a missing value fails loudly rather than defaulting
+# to something guessable.

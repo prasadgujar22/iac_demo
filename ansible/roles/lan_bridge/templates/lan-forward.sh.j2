@@ -1,0 +1,61 @@
+#!/usr/bin/env bash
+#
+# {{ ansible_managed }}
+#
+# Bridge LAN addresses to k8s NodePorts, one per WebLogic managed server.
+#
+# Design notes (learned the hard way):
+#  * the secondary IPs are added HERE because they are lost on reboot and socat
+#    cannot bind without them
+#  * `wait -n` returns when ANY child dies, so systemd can rebuild the whole set;
+#    a plain `wait` would block until all children exit and a single dead forward
+#    would go unnoticed indefinitely
+#  * the TERM trap reaps children, otherwise `systemctl stop` orphans socat
+#    processes that keep holding the port and the next start cannot bind
+#
+set -u
+
+NIC="{{ primary_nic }}"
+PRIMARY_IP="{{ primary_ip }}"
+TARGET_HOST="{{ k8s_master_ip }}"
+
+log() { echo "[wls-lan-forward] $*"; }
+
+if ! ip link show "$NIC" >/dev/null 2>&1; then
+    log "FATAL: NIC $NIC absent"
+    exit 1
+fi
+if ! ip -4 addr show "$NIC" | grep -q "$PRIMARY_IP"; then
+    log "FATAL: $NIC is missing $PRIMARY_IP; refusing to continue"
+    exit 1
+fi
+
+# Only ever ADD secondary addresses. Never touch $PRIMARY_IP.
+{% for ms in managed_servers %}
+if ip -4 addr show "$NIC" | grep -q "inet {{ ms.lan_ip }}/"; then
+    log "{{ ms.lan_ip }} already present"
+else
+    ip addr add "{{ ms.lan_ip }}/24" dev "$NIC" || { log "FATAL: cannot add {{ ms.lan_ip }}"; exit 1; }
+    log "added {{ ms.lan_ip }} to $NIC"
+fi
+{% endfor %}
+
+PIDS=()
+cleanup() {
+    log "shutting down forwards"
+    for P in "${PIDS[@]}"; do kill "$P" 2>/dev/null || true; done
+    wait 2>/dev/null || true
+    exit 0
+}
+trap cleanup TERM INT
+
+{% for ms in managed_servers %}
+socat TCP-LISTEN:{{ ms.lan_port }},bind={{ ms.lan_ip }},reuseaddr,fork TCP:${TARGET_HOST}:{{ ms.nodeport }} &
+PIDS+=("$!")
+log "forwarding {{ ms.lan_ip }}:{{ ms.lan_port }} -> ${TARGET_HOST}:{{ ms.nodeport }} ({{ ms.name }}, pid $!)"
+{% endfor %}
+
+log "all forwards up; supervising"
+wait -n "${PIDS[@]}"
+log "a forward exited (rc=$?); exiting so systemd restarts the unit"
+cleanup

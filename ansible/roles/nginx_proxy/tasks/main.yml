@@ -1,0 +1,99 @@
+---
+# Configure nginx as a reverse proxy for the WebLogic cluster with session
+# affinity based on the WebLogic JVM route ID.
+#
+# Route IDs are DISCOVERED at run time, never hardcoded: they change whenever a
+# managed server is renamed or the domain is rebuilt. Hardcoding them causes
+# logins to silently bounce back to the login page after the next rebuild.
+
+- name: Discover the JVM route ID of each managed server
+  # WebLogic embeds the owning server's JVM ID in the session cookie:
+  #   JSESSIONID=<sessionid>!<primaryJVMID>[!<secondaryJVMID>]
+  ansible.builtin.uri:
+    url: "http://{{ item.lan_ip }}:{{ item.lan_port }}{{ app_context_root }}/login"
+    method: GET
+    return_content: false
+    status_code: [200, 302]
+    timeout: 15
+  register: route_probe
+  retries: 10
+  delay: 6
+  until: route_probe is succeeded
+  loop: "{{ managed_servers }}"
+  loop_control:
+    label: "{{ item.name }}"
+  delegate_to: localhost
+  become: false
+  changed_when: false
+
+- name: Extract route IDs from the Set-Cookie headers
+  ansible.builtin.set_fact:
+    wls_routes: >-
+      {{ wls_routes | default([]) + [{
+        'name':     item.item.name,
+        'lan_ip':   item.item.lan_ip,
+        'lan_port': item.item.lan_port,
+        'route_id': (item.set_cookie | default('')
+                     | regex_search('JSESSIONID=[^;]*?(![-0-9]+)', '\\1') | first | default(''))
+      }] }}
+  loop: "{{ route_probe.results }}"
+  loop_control:
+    label: "{{ item.item.name }}"
+
+- name: Fail if any route ID could not be determined
+  # Proceeding without a route ID would silently break session affinity.
+  ansible.builtin.assert:
+    that:
+      - item.route_id | length > 1
+    fail_msg: >-
+      Could not read the JVM route ID for {{ item.name }}. Is the application
+      deployed and the managed server in RUNNING (not ADMIN) mode?
+    success_msg: "{{ item.name }} route ID = {{ item.route_id }}"
+  loop: "{{ wls_routes }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Ensure nginx is installed
+  ansible.builtin.apt:
+    name: nginx
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+  become: true
+
+- name: Remove the distro default site
+  # It also claims default_server on :80 and would shadow the proxy vhost.
+  ansible.builtin.file:
+    path: /etc/nginx/sites-enabled/default
+    state: absent
+  become: true
+  notify: reload nginx
+
+- name: Deploy the reverse proxy configuration
+  ansible.builtin.template:
+    src: wls-proxy.conf.j2
+    dest: /etc/nginx/sites-available/wls-proxy.conf
+    owner: root
+    group: root
+    mode: "0644"
+    validate: "nginx -t -c /etc/nginx/nginx.conf"
+  become: true
+  notify: reload nginx
+
+- name: Enable the reverse proxy site
+  ansible.builtin.file:
+    src: /etc/nginx/sites-available/wls-proxy.conf
+    dest: /etc/nginx/sites-enabled/wls-proxy.conf
+    state: link
+  become: true
+  notify: reload nginx
+
+- name: Ensure nginx is enabled and running
+  ansible.builtin.systemd:
+    name: nginx
+    enabled: true
+    state: started
+  become: true
+
+- name: Flush handlers so the proxy is live before verification
+  ansible.builtin.meta: flush_handlers

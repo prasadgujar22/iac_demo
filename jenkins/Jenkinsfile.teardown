@@ -1,0 +1,79 @@
+// ============================================================================
+// Teardown — destructive. Requires an explicit typed confirmation.
+//
+// Ordered in reverse of provisioning so dependents are removed before their
+// dependencies.
+// ============================================================================
+
+pipeline {
+    agent { label 'homelab' }
+
+    options {
+        timestamps()
+        disableConcurrentBuilds()
+        timeout(time: 45, unit: 'MINUTES')
+    }
+
+    parameters {
+        string(name: 'CONFIRM', defaultValue: '',
+               description: 'Type DESTROY (exactly) to confirm. Anything else aborts.')
+        booleanParam(name: 'KEEP_DATABASE', defaultValue: true,
+               description: 'Keep the Oracle VM. Destroying it DELETES ALL APPLICATION DATA permanently.')
+    }
+
+    stages {
+        stage('Confirm') {
+            steps {
+                script {
+                    if (params.CONFIRM != 'DESTROY') {
+                        error("Aborted: CONFIRM must be exactly 'DESTROY' (got '${params.CONFIRM}').")
+                    }
+                    timeout(time: 10, unit: 'MINUTES') {
+                        input message: params.KEEP_DATABASE
+                            ? 'Destroy nginx + WebLogic? The database VM will be KEPT.'
+                            : 'Destroy EVERYTHING including the database? ALL DATA WILL BE LOST.',
+                              ok: 'Destroy'
+                    }
+                }
+            }
+        }
+
+        stage('Stop LAN forwards') {
+            steps {
+                // Remove the bridges first so nothing keeps probing dying backends.
+                sh '''
+                    set -uo pipefail
+                    sudo systemctl disable --now wls-lan-forward.service 2>/dev/null || true
+                    echo "LAN forwards stopped"
+                '''
+            }
+        }
+
+        stage('Destroy nginx tier') {
+            steps {
+                sh 'terraform -chdir=terraform/30-nginx-microcloud destroy -auto-approve -no-color'
+            }
+        }
+
+        stage('Destroy WebLogic tier') {
+            steps {
+                sh 'terraform -chdir=terraform/20-wls-k8s destroy -auto-approve -no-color'
+            }
+        }
+
+        stage('Destroy database tier') {
+            when { expression { !params.KEEP_DATABASE } }
+            steps {
+                sh 'terraform -chdir=terraform/10-db-multipass destroy -auto-approve -no-color'
+            }
+        }
+    }
+
+    post {
+        success {
+            echo params.KEEP_DATABASE
+                ? 'Teardown complete. Database VM retained.'
+                : 'Teardown complete. Everything destroyed, including data.'
+        }
+    }
+}

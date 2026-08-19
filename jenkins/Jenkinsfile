@@ -1,0 +1,273 @@
+// ============================================================================
+// Full infrastructure + application pipeline
+//
+// AGENT REQUIREMENT
+// Jenkins runs in a Docker container here (jenkins/jenkins:lts-jdk17) which
+// contains ONLY git and ssh — no terraform, ansible, packer, kubectl, lxc or
+// multipass. Those tools must run on the HOST because they drive host-level
+// hypervisors (LXD unix socket, Multipass daemon, libvirt). Installing them in
+// the container would not help.
+//
+// Therefore this pipeline requires an SSH agent labelled 'homelab' that points
+// back at the host. Run jenkins/bootstrap-agent.sh once to create it.
+// ============================================================================
+
+pipeline {
+    agent { label 'homelab' }
+
+    options {
+        timestamps()
+        disableConcurrentBuilds()          // concurrent terraform runs corrupt state
+        buildDiscarder(logRotator(numToKeepStr: '30'))
+        timeout(time: 90, unit: 'MINUTES')
+    }
+
+    parameters {
+        booleanParam(
+            name: 'BUILD_IMAGE',
+            defaultValue: false,
+            description: 'Rebuild the WebLogic domain image with Packer. Only needed when the domain TOPOLOGY changes (cluster name, server count, ports). Application changes do not require this.'
+        )
+        choice(
+            name: 'DB_MODE',
+            choices: ['oracle', 'h2'],
+            description: 'oracle = Oracle XE on Multipass, shared by both managed servers. h2 = embedded in-memory, per-pod dataset (no cross-server visibility).'
+        )
+        booleanParam(
+            name: 'APPLY',
+            defaultValue: false,
+            description: 'Unchecked = plan only (no changes). Checked = apply. Defaults to plan so an accidental build cannot mutate infrastructure.'
+        )
+        booleanParam(
+            name: 'DEPLOY_APP',
+            defaultValue: true,
+            description: 'Build the WAR and deploy it after provisioning.'
+        )
+        string(
+            name: 'APP_BRANCH',
+            defaultValue: 'main',
+            description: 'Branch of the application repository to build.'
+        )
+    }
+
+    environment {
+        REPO_ROOT   = "${WORKSPACE}"
+        TF_IN_AUTOMATION = 'true'
+        TF_INPUT    = '0'
+        ANSIBLE_FORCE_COLOR = 'true'
+        PY_COLORS   = '1'
+    }
+
+    stages {
+
+        stage('Preflight') {
+            steps {
+                // Fails fast on platform faults (USB uplink carrier down, k8s node
+                // NotReady, missing tools) rather than halfway through provisioning.
+                sh './scripts/preflight.sh'
+            }
+        }
+
+        stage('Validate') {
+            // Static validation of every artifact before anything is applied.
+            parallel {
+                stage('terraform') {
+                    steps {
+                        sh '''
+                            set -euo pipefail
+                            for d in terraform/*/; do
+                                echo "--- validating $d"
+                                terraform -chdir="$d" init -backend=false -no-color
+                                terraform -chdir="$d" validate -no-color
+                            done
+                        '''
+                    }
+                }
+                stage('ansible') {
+                    steps {
+                        sh '''
+                            set -euo pipefail
+                            cd ansible
+                            ansible-playbook playbooks/site.yml --syntax-check
+                            ansible-playbook playbooks/deploy-app.yml --syntax-check
+                        '''
+                    }
+                }
+                stage('packer') {
+                    steps {
+                        sh '''
+                            set -euo pipefail
+                            cd packer/wls-domain-image
+                            packer init .
+                            packer validate .
+                        '''
+                    }
+                }
+            }
+        }
+
+        stage('Build domain image') {
+            when { expression { params.BUILD_IMAGE } }
+            steps {
+                withCredentials([usernamePassword(
+                    credentialsId: 'wls-admin',
+                    usernameVariable: 'WLS_USER',
+                    passwordVariable: 'WLS_PASS')]) {
+                    sh '''
+                        set -euo pipefail
+                        cd packer/wls-domain-image
+                        # Tag by build number so a bad image can be rolled back.
+                        packer build \
+                          -var "image_tag=2.${BUILD_NUMBER}" \
+                          -var "admin_username=${WLS_USER}" \
+                          .
+                    '''
+                }
+            }
+        }
+
+        stage('Plan') {
+            steps {
+                script {
+                    // 10-db is skipped entirely in h2 mode — no database to provision.
+                    def stacks = params.DB_MODE == 'oracle'
+                        ? ['10-db-multipass', '20-wls-k8s', '30-nginx-microcloud']
+                        : ['20-wls-k8s', '30-nginx-microcloud']
+                    stacks.each { s ->
+                        sh """
+                            set -euo pipefail
+                            terraform -chdir=terraform/${s} init -no-color
+                            terraform -chdir=terraform/${s} plan -no-color -out=tfplan
+                        """
+                    }
+                }
+            }
+        }
+
+        stage('Approve apply') {
+            when { expression { params.APPLY } }
+            steps {
+                script {
+                    // Guard rail: provisioning touches shared host networking.
+                    timeout(time: 15, unit: 'MINUTES') {
+                        input message: "Apply infrastructure changes? (DB_MODE=${params.DB_MODE})",
+                              ok: 'Apply'
+                    }
+                }
+            }
+        }
+
+        stage('Apply infrastructure') {
+            when { expression { params.APPLY } }
+            steps {
+                script {
+                    def stacks = params.DB_MODE == 'oracle'
+                        ? ['10-db-multipass', '20-wls-k8s', '30-nginx-microcloud']
+                        : ['20-wls-k8s', '30-nginx-microcloud']
+                    stacks.each { s ->
+                        sh "terraform -chdir=terraform/${s} apply -no-color tfplan"
+                    }
+                }
+            }
+        }
+
+        stage('Configure') {
+            when { expression { params.APPLY } }
+            steps {
+                withCredentials([
+                    usernamePassword(credentialsId: 'oracle-sys',
+                                     usernameVariable: 'ORA_SYS_USER',
+                                     passwordVariable: 'ORA_SYS_PASS'),
+                    usernamePassword(credentialsId: 'oracle-app',
+                                     usernameVariable: 'ORA_APP_USER',
+                                     passwordVariable: 'ORA_APP_PASS')
+                ]) {
+                    // Secrets arrive as env vars and are passed via -e without ever
+                    // being written to disk or echoed.
+                    script {
+                        // Skip the app tag when DEPLOY_APP is false; there is no
+                        // shell-side conditional in --skip-tags.
+                        def skip = params.DEPLOY_APP ? '' : '--skip-tags app'
+                        sh """
+                            set -euo pipefail
+                            cd ansible
+                            ansible-playbook playbooks/site.yml \
+                              -e "db_mode=\${DB_MODE}" \
+                              -e "app_repo_version=\${APP_BRANCH}" \
+                              -e "oracle_sys_password=\${ORA_SYS_PASS}" \
+                              -e "oracle_app_user=\${ORA_APP_USER}" \
+                              -e "oracle_app_password=\${ORA_APP_PASS}" \
+                              ${skip}
+                        """
+                    }
+                }
+            }
+        }
+
+        stage('Deploy application') {
+            when {
+                allOf {
+                    expression { params.DEPLOY_APP }
+                    expression { !params.APPLY }   // Configure already deployed it
+                }
+            }
+            steps {
+                withCredentials([usernamePassword(
+                    credentialsId: 'oracle-app',
+                    usernameVariable: 'ORA_APP_USER',
+                    passwordVariable: 'ORA_APP_PASS')]) {
+                    sh '''
+                        set -euo pipefail
+                        cd ansible
+                        ansible-playbook playbooks/deploy-app.yml \
+                          -e "db_mode=${DB_MODE}" \
+                          -e "app_repo_version=${APP_BRANCH}" \
+                          -e "oracle_app_user=${ORA_APP_USER}" \
+                          -e "oracle_app_password=${ORA_APP_PASS}"
+                    '''
+                }
+            }
+        }
+
+        stage('Verify') {
+            steps {
+                // Real HTTP assertions: session affinity across the login handover,
+                // distribution across servers, and a write-then-read round trip.
+                sh '''
+                    set -euo pipefail
+                    cd ansible
+                    ansible-playbook playbooks/site.yml --tags verify -e "db_mode=${DB_MODE}"
+                '''
+            }
+        }
+    }
+
+    post {
+        success {
+            script {
+                echo """
+================================================================
+  Pipeline succeeded
+
+  APPLICATION URL:
+    http://192.168.29.200/customer-onboarding/login
+
+  Direct per-JVM endpoints:
+    ms1  http://192.168.29.201:8090/customer-onboarding/login
+    ms2  http://192.168.29.202:8090/customer-onboarding/login
+
+  Database mode: ${params.DB_MODE}
+================================================================
+"""
+            }
+        }
+        failure {
+            echo 'Pipeline failed. Check the Preflight stage first — most failures are platform faults (USB uplink carrier down, k8s node NotReady) rather than code errors.'
+        }
+        always {
+            archiveArtifacts artifacts: 'terraform/*/.generated/*, packer/*/.generated/*',
+                             allowEmptyArchive: true,
+                             fingerprint: true
+        }
+    }
+}

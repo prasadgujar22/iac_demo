@@ -1,0 +1,39 @@
+#!/usr/bin/env python
+# {{ ansible_managed }}
+#
+# WLST runs on Jython 2 - no f-strings, no dict comprehensions.
+import os
+import sys
+
+admin_pass = os.environ.get('ADMIN_PASS')
+if not admin_pass:
+    print("ERROR: ADMIN_PASS not set")
+    sys.exit(1)
+
+APP     = '{{ app_name }}'
+WAR     = '{{ wls_domain_home }}/applications/{{ app_war_name }}'
+TARGETS = '{{ wls_cluster_name }}'
+URL     = 't3://{{ wls_domain_uid }}-adminserver.{{ wls_namespace }}.svc.cluster.local:7001'
+
+try:
+    connect('{{ wls_admin_username | default("prasadmin") }}', admin_pass, URL)
+except Exception, e:
+    print("Connect failed: " + str(e))
+    sys.exit(1)
+
+# Undeploy first: deploying over a running app can leave stale classes loaded.
+try:
+    undeploy(APP, targets=TARGETS)
+    print("Undeployed existing " + APP)
+except Exception, e:
+    print("No existing deployment to remove (" + str(e)[:80] + ")")
+
+try:
+    deploy(appName=APP, path=WAR, targets=TARGETS, upload='false')
+    print("Deployment successful!")
+except Exception, e:
+    print("Deploy failed: " + str(e))
+    disconnect()
+    sys.exit(1)
+
+disconnect()

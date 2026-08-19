@@ -1,0 +1,132 @@
+---
+# Install and configure Oracle XE 21c on the Multipass DB VM.
+#
+# Platform note: this VM is on Multipass (10.2.243.0/24) specifically so that
+# WebLogic pods can reach the listener. The previous libvirt VM on
+# 192.168.122.0/24 was unreachable from pods ("No route to host"), which forced
+# the domain into ADMIN mode and blocked all deployment.
+
+- name: Wait for cloud-init prerequisites to complete
+  ansible.builtin.wait_for:
+    path: /var/lib/cloud/oracle-prereqs-done
+    timeout: 600
+  become: true
+
+- name: Check whether Oracle XE is already installed
+  ansible.builtin.stat:
+    path: /etc/init.d/oracle-xe-21c
+  register: xe_installed
+  become: true
+
+- name: Assert swap exists
+  # The XE installer aborts without swap, and Multipass images ship with none.
+  ansible.builtin.assert:
+    that:
+      - ansible_facts['swaptotal_mb'] | int > 0
+    fail_msg: "Oracle XE requires swap; cloud-init should have created /swapfile."
+
+- name: Download the Oracle XE RPM
+  ansible.builtin.get_url:
+    url: "{{ oracle_xe_rpm_url }}"
+    dest: "/tmp/{{ oracle_xe_rpm_url | basename }}"
+    mode: "0644"
+    timeout: 120
+  become: true
+  when: not xe_installed.stat.exists
+  register: xe_download
+  retries: 3
+  delay: 10
+  until: xe_download is succeeded
+
+- name: Convert and install the RPM via alien
+  # Oracle ships RPM only; alien converts it for Debian/Ubuntu.
+  ansible.builtin.shell:
+    cmd: |
+      set -euo pipefail
+      cd /tmp
+      alien --install --scripts "{{ oracle_xe_rpm_url | basename }}"
+    creates: /etc/init.d/oracle-xe-21c
+  become: true
+  when: not xe_installed.stat.exists
+  async: 2400
+  poll: 30
+
+- name: Configure the database (creates XEPDB1)
+  ansible.builtin.shell:
+    cmd: /etc/init.d/oracle-xe-21c configure
+    creates: "{{ oracle_home }}/dbs/spfileXE.ora"
+  become: true
+  environment:
+    ORACLE_DOCKER_INSTALL: "false"
+    ORACLE_PASSWORD: "{{ oracle_sys_password }}"
+  async: 3600
+  poll: 30
+  no_log: true          # never leak the SYS password into logs
+
+- name: Bind the listener to all interfaces
+  # The generated listener.ora binds to the hostname, which resolves only
+  # locally, so remote clients get ORA-12541 "no listener". 0.0.0.0 also fails on
+  # some builds; the VM's actual address is the reliable choice.
+  ansible.builtin.template:
+    src: listener.ora.j2
+    dest: "{{ oracle_home }}/network/admin/listener.ora"
+    owner: oracle
+    group: oinstall
+    mode: "0640"
+    backup: true
+  become: true
+  notify: restart oracle listener
+
+- name: Ensure Oracle XE is enabled and running
+  ansible.builtin.service:
+    name: oracle-xe-21c
+    enabled: true
+    state: started
+  become: true
+
+- name: Flush handlers so the listener is rebound before we probe it
+  ansible.builtin.meta: flush_handlers
+
+- name: Wait for the listener to accept TCP connections
+  ansible.builtin.wait_for:
+    host: "{{ ansible_host | default(ansible_default_ipv4.address) }}"
+    port: "{{ oracle_listener_port }}"
+    timeout: 300
+    state: started
+
+- name: Create the application schema
+  # Idempotent: the script tolerates an existing user and existing table.
+  ansible.builtin.template:
+    src: create-app-schema.sql.j2
+    dest: /tmp/create-app-schema.sql
+    owner: oracle
+    group: oinstall
+    mode: "0600"
+  become: true
+  no_log: true
+
+- name: Apply the application schema
+  ansible.builtin.shell:
+    cmd: |
+      set -euo pipefail
+      export ORACLE_HOME="{{ oracle_home }}"
+      export ORACLE_SID=XE
+      export PATH="$ORACLE_HOME/bin:$PATH"
+      sqlplus -S -L "sys/{{ oracle_sys_password }}@localhost:{{ oracle_listener_port }}/{{ oracle_pdb }} as sysdba" \
+        @/tmp/create-app-schema.sql
+  become: true
+  become_user: oracle
+  register: schema_apply
+  changed_when: "'created' in schema_apply.stdout"
+  no_log: true
+
+- name: Remove the schema script (contains credentials)
+  ansible.builtin.file:
+    path: /tmp/create-app-schema.sql
+    state: absent
+  become: true
+
+- name: Report the JDBC URL for downstream consumers
+  ansible.builtin.set_fact:
+    oracle_jdbc_url: >-
+      jdbc:oracle:thin:@//{{ ansible_host | default(ansible_default_ipv4.address) }}:{{ oracle_listener_port }}/{{ oracle_pdb }}
