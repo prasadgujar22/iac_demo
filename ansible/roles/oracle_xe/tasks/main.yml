@@ -38,6 +38,26 @@
   delay: 10
   until: xe_download is succeeded
 
+- name: Report free space before conversion
+  # alien needs ~27G peak (RPM 2.2G + extracted 12G + .deb 2.2G + installed 11G).
+  # Fail with a clear message rather than dying mid-dpkg with "no space left".
+  ansible.builtin.shell:
+    cmd: df -BG --output=avail / | tail -1 | tr -dc '0-9'
+  register: xe_space
+  changed_when: false
+  when: not xe_installed.stat.exists
+
+- name: Require enough disk for the alien conversion
+  ansible.builtin.assert:
+    that:
+      - xe_space.stdout | int >= 26
+    fail_msg: >-
+      Only {{ xe_space.stdout }}G free; the alien conversion needs ~27G peak
+      (RPM 2.2G + extracted 12G + .deb 2.2G + installed 11G). Increase the
+      `disk` variable in terraform/10-db-multipass and recreate the VM.
+    success_msg: "{{ xe_space.stdout }}G free — sufficient for the conversion"
+  when: not xe_installed.stat.exists
+
 - name: Convert and install the RPM via alien
   # Oracle ships RPM only; alien converts it for Debian/Ubuntu.
   ansible.builtin.shell:
@@ -50,6 +70,24 @@
   when: not xe_installed.stat.exists
   async: 2400
   poll: 30
+
+- name: Reclaim conversion intermediates
+  # The RPM, the extracted tree and the generated .deb total ~16G and are of no
+  # use once installed. Removing them frees space for datafile growth.
+  ansible.builtin.shell:
+    cmd: |
+      set -euo pipefail
+      rm -rf /tmp/oracle-database-xe-21c-1.0 \
+             /tmp/oracle-database-xe-21c-*.rpm \
+             /tmp/oracle-database-xe-21c_*.deb
+      df -BG --output=avail / | tail -1 | tr -dc '0-9'
+  become: true
+  register: xe_reclaimed
+  changed_when: true
+
+- name: Report reclaimed space
+  ansible.builtin.debug:
+    msg: "{{ xe_reclaimed.stdout }}G free after removing conversion intermediates"
 
 - name: Configure the database (creates XEPDB1)
   ansible.builtin.shell:

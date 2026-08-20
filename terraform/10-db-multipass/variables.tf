@@ -23,9 +23,24 @@ variable "memory" {
 }
 
 variable "disk" {
-  description = "Disk size. The XE installation alone consumes ~11G."
+  description = <<-EOT
+    Disk size.
+
+    Sized for alien's PEAK usage, not the installed footprint. Converting the
+    Oracle RPM keeps four copies on disk at once:
+
+      original RPM        2.2G
+      extracted tree     12.0G
+      generated .deb      2.2G
+      installed tree     11.0G   (/opt/oracle)
+      ------------------------
+      peak              ~27.4G
+
+    A 24G disk fails partway through `dpkg -i` with no space left. 48G leaves
+    headroom for datafile growth after the intermediates are cleaned up.
+  EOT
   type        = string
-  default     = "24G"
+  default     = "48G"
 }
 
 variable "listener_port" {
