@@ -54,7 +54,7 @@ resource "kubernetes_namespace" "wls" {
 resource "random_password" "wls_admin" {
   length           = 20
   special          = true
-  override_special = "_-"          # WLST/boot.properties choke on some symbols
+  override_special = "_-" # WLST/boot.properties choke on some symbols
   min_upper        = 2
   min_lower        = 2
   min_numeric      = 2
@@ -62,7 +62,7 @@ resource "random_password" "wls_admin" {
 
 resource "random_password" "runtime_encryption" {
   length  = 32
-  special = false                  # must survive being passed through WDT
+  special = false # must survive being passed through WDT
 }
 
 resource "kubernetes_secret" "wls_credentials" {
@@ -186,11 +186,11 @@ resource "kubernetes_manifest" "domain" {
         overrideDistributionStrategy = "Dynamic"
       }
 
-      failureRetryIntervalSeconds  = 120
-      failureRetryLimitMinutes     = 1440
-      maxClusterConcurrentShutdown = 1
-      maxClusterConcurrentStartup  = 0
-      maxClusterUnavailable        = 1
+      failureRetryIntervalSeconds   = 120
+      failureRetryLimitMinutes      = 1440
+      maxClusterConcurrentShutdown  = 1
+      maxClusterConcurrentStartup   = 0
+      maxClusterUnavailable         = 1
       replaceVariablesInJavaOptions = false
     }
   }
@@ -252,9 +252,9 @@ resource "kubernetes_service" "managed_server" {
 resource "local_file" "wls_facts" {
   filename = "${path.module}/.generated/wls_facts.yaml"
   content = yamlencode({
-    namespace   = var.namespace
-    domain_uid  = var.domain_uid
-    cluster_name = var.cluster_name
+    namespace      = var.namespace
+    domain_uid     = var.domain_uid
+    cluster_name   = var.cluster_name
     admin_nodeport = var.admin_nodeport
     ms_listen_port = var.ms_listen_port
     managed_servers = [

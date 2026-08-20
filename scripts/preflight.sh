@@ -83,6 +83,27 @@ else
     bad "k8s API unreachable (multipass VMs started? kubeconfig valid?)"
 fi
 
+hdr "SSH key for VM provisioning"
+# Terraform injects this key via cloud-init so Ansible can reach new VMs.
+# Note: Terraform's file() does NOT expand "~", so the stacks use pathexpand();
+# this check mirrors that behaviour.
+SSH_KEY="${SSH_KEY:-$HOME/.ssh/homelab_iac_ed25519}"
+if [ -f "${SSH_KEY}.pub" ]; then
+    ok "$(basename "${SSH_KEY}").pub present"
+    if [ -f "$SSH_KEY" ]; then
+        PERM=$(stat -c '%a' "$SSH_KEY" 2>/dev/null)
+        if [ "$PERM" = "600" ]; then
+            ok "private key permissions 600"
+        else
+            warn "private key is $PERM, expected 600 — ssh may refuse it"
+        fi
+    else
+        bad "public key exists but private key $SSH_KEY is missing"
+    fi
+else
+    bad "SSH keypair missing (${SSH_KEY}.pub) — create it with: make ssh-key"
+fi
+
 hdr "Disk headroom"
 AVAIL=$(df --output=avail -BG / 2>/dev/null | tail -1 | tr -dc '0-9')
 if [ "${AVAIL:-0}" -ge 20 ]; then

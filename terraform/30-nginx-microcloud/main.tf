@@ -32,6 +32,9 @@ locals {
   # Reserve the forward address as a /32 route on the uplink so OVN answers ARP
   # for it on the physical segment.
   forward_route = "${var.proxy_lan_ip}/32"
+
+  # pathexpand() is REQUIRED: Terraform's file() does not expand "~".
+  ssh_public_key_file = pathexpand(var.ssh_public_key_path)
 }
 
 # ---------------------------------------------------------------------------
@@ -58,7 +61,7 @@ resource "lxd_instance" "nginx" {
       packages:
         - nginx
       ssh_authorized_keys:
-        - ${trimspace(file(var.ssh_public_key_path))}
+        - ${trimspace(file(local.ssh_public_key_file))}
       runcmd:
         - systemctl enable --now nginx
     EOT

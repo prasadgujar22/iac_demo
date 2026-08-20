@@ -45,12 +45,28 @@ the k8s nodes, so pods reach it directly. The platform choice is the fix.
 
 ```bash
 make help              # list targets
+make ssh-key           # one-off: create the keypair injected into new VMs
 make preflight         # verify toolchain + platform health
 make plan              # terraform plan across all stacks (read-only)
 make infra             # provision DB + WLS + nginx
 make app               # build WAR and deploy to the cluster
 make verify            # end-to-end assertions incl. session affinity
 ```
+
+`make ssh-key` creates `~/.ssh/homelab_iac_ed25519`, a dedicated keypair injected
+via cloud-init so Ansible can reach newly provisioned VMs. It is deliberately not
+`~/.ssh/id_rsa`, which does not exist on every host. To use an existing key:
+
+```bash
+terraform apply -var ssh_public_key_path=~/.ssh/other.pub \
+                -var ssh_private_key_path=~/.ssh/other
+```
+
+> Terraform's `file()` does **not** expand `~`, so every stack wraps key paths in
+> `pathexpand()`. Without it you get
+> `Invalid value for "path" parameter: no file exists at "~/.ssh/..."` even when
+> the file is present. A `precondition` reports the missing key with the fix
+> instead of an opaque evaluation error.
 
 ## Critical constraint: Jenkins runs in Docker
 

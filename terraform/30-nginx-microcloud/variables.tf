@@ -64,7 +64,7 @@ variable "proxy_listen_port" {
 }
 
 variable "ssh_public_key_path" {
-  description = "Public key injected via cloud-init."
+  description = "Public key injected via cloud-init. Create it with `make ssh-key`."
   type        = string
-  default     = "~/.ssh/id_rsa.pub"
+  default     = "~/.ssh/homelab_iac_ed25519.pub"
 }

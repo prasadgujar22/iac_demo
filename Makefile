@@ -16,7 +16,18 @@ else
 STACKS := 20-wls-k8s 30-nginx-microcloud
 endif
 
-.PHONY: help preflight validate init plan infra app verify destroy fmt clean
+.PHONY: help preflight validate init plan infra app verify destroy fmt clean ssh-key
+
+SSH_KEY ?= $(HOME)/.ssh/homelab_iac_ed25519
+
+ssh-key: ## Generate the dedicated homelab-iac SSH keypair (idempotent)
+	@if [ -f "$(SSH_KEY)" ]; then \
+	  echo "key already exists: $(SSH_KEY)"; \
+	else \
+	  ssh-keygen -t ed25519 -N "" -C "homelab-iac@$$(hostname)" -f "$(SSH_KEY)"; \
+	  echo "created $(SSH_KEY)"; \
+	fi
+	@chmod 600 "$(SSH_KEY)"; chmod 644 "$(SSH_KEY).pub"
 
 help: ## Show available targets
 	@echo "Homelab IaC — nginx (MicroCloud) / WebLogic (k8s) / Oracle XE (Multipass)"

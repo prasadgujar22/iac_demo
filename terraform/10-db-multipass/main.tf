@@ -22,9 +22,38 @@ terraform {
 }
 
 locals {
+  # pathexpand() is REQUIRED: Terraform's file() does not expand "~", and fails
+  # with 'no file exists at "~/.ssh/..."' even when the file is present.
+  ssh_public_key_file  = pathexpand(var.ssh_public_key_path)
+  ssh_private_key_file = pathexpand(var.ssh_private_key_path)
+
   cloud_init = templatefile("${path.module}/cloud-init.yaml.tftpl", {
-    ssh_authorized_key = trimspace(file(var.ssh_public_key_path))
+    # Guarded so a missing key surfaces via the precondition below (which has an
+    # actionable message) instead of an opaque file() evaluation error.
+    ssh_authorized_key = fileexists(local.ssh_public_key_file) ? trimspace(file(local.ssh_public_key_file)) : "MISSING-SSH-KEY"
   })
+}
+
+# Fail early with an actionable message rather than a bare file() error.
+resource "terraform_data" "ssh_key_precondition" {
+  lifecycle {
+    precondition {
+      condition     = fileexists(local.ssh_public_key_file)
+      error_message = <<-EOT
+        SSH public key not found: ${local.ssh_public_key_file}
+
+        The database VM needs a key injected via cloud-init so Ansible can
+        connect. Generate the dedicated homelab-iac keypair:
+
+            make ssh-key
+
+        or point at an existing key:
+
+            terraform apply -var ssh_public_key_path=~/.ssh/other.pub \
+                            -var ssh_private_key_path=~/.ssh/other
+      EOT
+    }
+  }
 }
 
 # Rendered cloud-init is written out so it can be inspected and diffed.
@@ -32,6 +61,9 @@ resource "local_file" "cloud_init" {
   filename        = "${path.module}/.generated/cloud-init-${var.vm_name}.yaml"
   content         = local.cloud_init
   file_permission = "0600"
+
+  # Ensures the SSH-key precondition is evaluated before we render cloud-init.
+  depends_on = [terraform_data.ssh_key_precondition]
 }
 
 resource "null_resource" "db_vm" {
@@ -109,7 +141,7 @@ resource "local_file" "inventory" {
         (var.vm_name) = {
           ansible_host                 = data.external.db_vm_ip.result.ip
           ansible_user                 = "ubuntu"
-          ansible_ssh_private_key_file = var.ssh_private_key_path
+          ansible_ssh_private_key_file = local.ssh_private_key_file
           oracle_listener_port         = var.listener_port
         }
       }
