@@ -34,6 +34,18 @@ variable "storage_pool" {
   default     = "remote"
 }
 
+variable "lxd_project" {
+  description = <<-EOT
+    LXD project to create resources in.
+
+    Set explicitly because the provider's implicit project lookup can fail on
+    this MicroCloud with a "projects table / transaction already committed"
+    error, even though the LXD CLI works fine.
+  EOT
+  type        = string
+  default     = "default"
+}
+
 variable "ovn_network" {
   description = "OVN network the instance attaches to."
   type        = string

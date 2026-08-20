@@ -28,6 +28,16 @@ provider "lxd" {
   accept_remote_certificate    = true
 }
 
+# The provider's implicit project lookup can fail against this MicroCloud with:
+#   Failed instance creation: Fetch project database object: Failed to fetch
+#   from "projects" table: sql: transaction has already been committed or
+#   rolled back
+# The LXD CLI creates the same instance without error, so the daemon is healthy;
+# naming the project explicitly avoids the provider's failing lookup path.
+locals {
+  lxd_project = var.lxd_project
+}
+
 locals {
   # Reserve the forward address as a /32 route on the uplink so OVN answers ARP
   # for it on the physical segment.
@@ -41,9 +51,10 @@ locals {
 # nginx VM
 # ---------------------------------------------------------------------------
 resource "lxd_instance" "nginx" {
-  name  = var.instance_name
-  image = var.image
-  type  = "virtual-machine"
+  name    = var.instance_name
+  image   = var.image
+  type    = "virtual-machine"
+  project = local.lxd_project
 
   lifecycle {
     # `image` is not recoverable when an existing instance is imported, so
@@ -101,6 +112,7 @@ resource "lxd_instance" "nginx" {
 # Publish to the LAN via OVN network forward
 # ---------------------------------------------------------------------------
 resource "lxd_network_forward" "proxy" {
+  project        = local.lxd_project
   network        = var.ovn_network
   listen_address = var.proxy_lan_ip
   description    = "nginx reverse proxy -> WebLogic cluster (JSESSIONID route-ID affinity)"
