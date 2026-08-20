@@ -16,7 +16,7 @@ else
 STACKS := 20-wls-k8s 30-nginx-microcloud
 endif
 
-.PHONY: help preflight validate init plan infra app verify destroy fmt clean ssh-key
+.PHONY: help preflight validate init plan infra app verify destroy fmt clean ssh-key import
 
 SSH_KEY ?= $(HOME)/.ssh/homelab_iac_ed25519
 
@@ -62,13 +62,26 @@ plan: preflight init ## Plan all stacks (no changes made)
 	done
 
 infra: preflight init ## Provision infrastructure (prompts before applying)
-	@read -p "Apply infrastructure changes (DB_MODE=$(DB_MODE))? [y/N] " a; \
-	  [[ "$$a" == "y" ]] || { echo "aborted"; exit 1; }
+	@printf "Apply infrastructure changes (DB_MODE=$(DB_MODE))? [y/N] "; \
+	  read a; \
+	  case "$$a" in \
+	    [yY]|[yY][eE][sS]) ;; \
+	    *) echo "aborted (answer y or yes)"; exit 1 ;; \
+	  esac
 	@for s in $(STACKS); do \
 	  echo "=== apply $$s ==="; \
-	  $(TF) -chdir=terraform/$$s apply -auto-approve -no-color; \
+	  $(TF) -chdir=terraform/$$s apply -auto-approve -no-color || { \
+	    echo ""; \
+	    echo "!! apply failed for $$s"; \
+	    echo "!! If the error is 'already exists', the resource was created"; \
+	    echo "!! outside Terraform. Adopt it into state with:  make import"; \
+	    exit 1; \
+	  }; \
 	done
 	@cd ansible && $(AP) playbooks/site.yml -e "db_mode=$(DB_MODE)" -e "app_repo_version=$(APP_BRANCH)"
+
+import: init ## Adopt existing hand-built infrastructure into Terraform state
+	@./scripts/import-existing.sh
 
 app: ## Build and deploy the application only
 	@cd ansible && $(AP) playbooks/deploy-app.yml \

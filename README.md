@@ -41,6 +41,34 @@ the k8s nodes, so pods reach it directly. The platform choice is the fix.
 | `ansible/` | Ansible | Oracle XE bootstrap, app build+deploy, socat unit, nginx config |
 | `jenkins/` | Jenkins | Pipelines: full infra, app-only redeploy, teardown |
 
+## Adopting existing hand-built infrastructure
+
+Most of this stack existed before the repo did. Terraform does not know about
+those objects, so `apply` tries to **create** them and fails with
+`already exists`. Adopt them into state first — this is idempotent and
+non-destructive:
+
+```bash
+make import
+make plan          # review the diffs carefully before applying
+```
+
+Two protections exist because imported objects differ from the code:
+
+- `lxd_instance.nginx` ignores changes to `image`/`description`. An imported
+  instance reports no image, which Terraform reads as a change and would
+  **destroy and rebuild the working proxy**. To rebuild deliberately, taint it.
+- The WebLogic secrets ignore changes to `data`. Regenerating the admin password
+  breaks a running domain, because it is baked into each server's
+  `boot.properties` at creation time and the managed servers can then no longer
+  authenticate. Rotating the runtime-encryption secret likewise invalidates the
+  encrypted WDT model and forces a domain rebuild.
+
+**The Domain and Cluster CRs cannot be imported** — Terraform's
+`kubernetes_manifest` has no import support. Either leave them managed outside
+Terraform, or delete them and let Terraform recreate them (which restarts the
+domain). `make plan` will always show them as "to add" until you choose.
+
 ## Quick start
 
 ```bash

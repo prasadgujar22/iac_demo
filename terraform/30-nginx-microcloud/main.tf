@@ -45,6 +45,15 @@ resource "lxd_instance" "nginx" {
   image = var.image
   type  = "virtual-machine"
 
+  lifecycle {
+    # `image` is not recoverable when an existing instance is imported, so
+    # Terraform sees it as a change and would DESTROY AND REBUILD a working
+    # proxy. The image only matters at creation time, so changes to it are
+    # ignored for an already-existing instance. To deliberately rebuild on a new
+    # image, taint or destroy the instance explicitly.
+    ignore_changes = [image, description]
+  }
+
   # Provider v2 requires limits.* in a dedicated map, not inside config.
   limits = {
     cpu    = var.cpus

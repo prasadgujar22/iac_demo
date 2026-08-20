@@ -75,6 +75,15 @@ resource "kubernetes_secret" "wls_credentials" {
     password = random_password.wls_admin.result
   }
   type = "Opaque"
+
+  lifecycle {
+    # Rotating this on an EXISTING domain breaks it: the password is baked into
+    # each server's boot.properties at domain-creation time, so the managed
+    # servers can no longer authenticate to the admin server. Terraform would
+    # otherwise overwrite an imported secret with a freshly generated password.
+    # To rotate deliberately, change it in WebLogic first, then update here.
+    ignore_changes = [data]
+  }
 }
 
 resource "kubernetes_secret" "runtime_encryption" {
@@ -84,6 +93,13 @@ resource "kubernetes_secret" "runtime_encryption" {
   }
   data = { password = random_password.runtime_encryption.result }
   type = "Opaque"
+
+  lifecycle {
+    # Changing this invalidates the encrypted WDT model of an existing domain,
+    # forcing a full re-introspection and domain rebuild. Never rotate it
+    # implicitly on a running domain.
+    ignore_changes = [data]
+  }
 }
 
 # ---------------------------------------------------------------------------
