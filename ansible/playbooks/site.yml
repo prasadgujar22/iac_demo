@@ -11,19 +11,31 @@
   gather_facts: false
   tags: [always]
   tasks:
-    - name: Read the database stack's generated inventory
-      ansible.builtin.include_vars:
-        file: "{{ playbook_dir }}/../terraform/10-db-multipass/.generated/db_inventory.yaml"
-        name: db_tf
-      failed_when: false
-      register: db_tf_load
+    - name: Locate the database stack's generated inventory
+      # playbook_dir is .../ansible/playbooks (the PLAYBOOK's directory, not the
+      # ansible root), so the repo root is two levels up. Getting this wrong
+      # makes stat report exists=false and the DB host silently stays empty.
+      ansible.builtin.stat:
+        path: "{{ playbook_dir }}/../../terraform/10-db-multipass/.generated/db_inventory.yaml"
+      register: db_inv
 
-    - name: Derive the database host
+    - name: Read the database stack's generated inventory
+      # include_vars with `name:` nests the file under that key, so the data is
+      # at db_tf.db.hosts - NOT db_tf.hosts. Read the file directly instead; it
+      # is unambiguous and avoids that trap.
+      ansible.builtin.set_fact:
+        db_tf: "{{ lookup('ansible.builtin.file', db_inv.stat.path) | from_yaml }}"
+      when: db_inv.stat.exists
+
+    - name: Derive the database host from the Terraform-generated inventory
+      # The expression must be self-guarding: Ansible finalizes set_fact args
+      # BEFORE evaluating `when`, so a `when` guard does not prevent an
+      # undefined-variable error inside the template.
       ansible.builtin.set_fact:
         oracle_db_host: >-
-          {{ (db_tf.db.hosts.values() | list | first).ansible_host
-             if db_tf_load is succeeded and db_tf is defined
-             else (oracle_db_host | default('')) }}
+          {{ (db_tf | default({}, true))
+             | community.general.json_query('db.hosts.*.ansible_host')
+             | default([], true) | first | default(oracle_db_host | default(''), true) }}
       when: db_mode == 'oracle'
 
     - name: Require a database host when running in oracle mode
