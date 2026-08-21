@@ -6,36 +6,47 @@
 | Application redeploy | `Jenkinsfile.app` | Rebuild the WAR, redeploy, refresh routing, verify. The fast inner loop. |
 | Teardown | `Jenkinsfile.teardown` | Destroy in reverse order. Requires typing `DESTROY`. |
 
-## The agent requirement is not optional
+## Why Jenkins runs on the host, not in Docker
 
-Jenkins here runs as a Docker container (`jenkins/jenkins:lts-jdk17`). Verified
-contents: **`git` and `ssh` only**. Absent: `terraform`, `ansible`, `packer`,
-`kubectl`, `lxc`, `multipass`.
+Jenkins originally ran as a Docker container (`jenkins/jenkins:lts-jdk17`).
+Verified contents: **`git` and `ssh` only**. Absent: `terraform`, `ansible`,
+`packer`, `kubectl`, `multipass`.
 
 Those tools cannot simply be installed into the container, because they drive
 **host-level** facilities:
 
-- `lxc` needs the LXD unix socket
-- `multipass` needs the Multipass daemon
+- `multipass` needs the Multipass daemon socket (and client authentication)
+- `docker` on the DB VM runs the Oracle XE container
 - `kubectl` needs the host kubeconfig and routes to `10.2.243.0/24`
 - the socat/systemd tasks configure host networking
 
-So every pipeline declares `agent { label 'homelab' }` and runs on an SSH agent
-pointing back at the host. Running on Jenkins' built-in node fails by design —
-better an explicit "no such label" than a half-provisioned stack.
+**Jenkins therefore runs natively on the host** (apt package + systemd unit),
+and the built-in node carries the label `homelab`, so the pipelines drive the
+toolchain directly with no SSH indirection.
+
+`bootstrap-agent.sh` remains only for the older containerised setup; it is not
+needed for the native install.
+
+Host setup the native install needs:
 
 ```bash
-./bootstrap-agent.sh      # generates the key, authorises it, prints UI steps
+# JENKINS_HOME under /home — snap tools (multipass) refuse a home outside /home
+sudo systemctl edit jenkins       # Environment="JENKINS_HOME=/home/jenkins"
+
+# the CI user needs the cluster and passwordless sudo for multipass/socat
+sudo -u jenkins mkdir -p /home/jenkins/.kube
+sudo cp ~/.kube/config /home/jenkins/.kube/config
+sudo chown -R jenkins:jenkins /home/jenkins/.kube
 ```
 
-Note the agent host address must be the **container's gateway**, not
-`127.0.0.1` — inside a container that means the container itself.
+Terraform state lives at `/home/jenkins/tfstate/`, **outside any job workspace** —
+each Jenkins job gets its own workspace, so per-workspace state let the teardown
+job report success having destroyed nothing.
 
 ## Credentials
 
 | ID | Kind | Used for |
 |---|---|---|
-| `homelab-agent-key` | SSH private key | Agent connection |
 | `wls-admin` | username/password | WebLogic administrator |
 | `oracle-sys` | username/password | Oracle SYS |
 | `oracle-app` | username/password | Application schema owner |

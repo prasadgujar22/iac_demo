@@ -22,7 +22,8 @@ single host; WebLogic runs on a Multipass-based Kubernetes cluster.
                             │  jdbc:oracle:thin
               ┌─────────────▼──────────────┐
               │  Oracle XE 21c / XEPDB1    │   Multipass VM
-              │  :1521                     │   10.2.243.x
+              │  gvenzl/oracle-xe:21-slim  │   10.2.243.x
+              │  CONTAINER on the VM :1521 │   (Docker)
               └────────────────────────────┘
 ```
 
@@ -34,12 +35,61 @@ Only the LAN entry point needs a bridge, because Multipass VMs are NAT'd.
 | Path | Tool | Responsibility |
 |---|---|---|
 | `packer/wls-domain-image/` | Packer | WebLogic Model-in-Image domain image |
-| `terraform/10-db-multipass/` | Terraform | Oracle XE VM |
+| `terraform/10-db-multipass/` | Terraform | VM that *hosts* the Oracle XE container |
 | `terraform/20-wls-k8s/` | Terraform | Namespace, secrets, Domain/Cluster CRs, NodePorts |
 | `terraform/30-nginx-multipass/` | Terraform | nginx proxy VM |
-| `ansible/` | Ansible | XE bootstrap, app build+deploy, socat bridges, nginx config |
+| `ansible/` | Ansible | Oracle XE **container**, app build+deploy, socat bridges, nginx config |
 | `jenkins/` | Jenkins | Pipelines: full infra, app-only redeploy, teardown |
 | `app/customer-onboarding/` | Maven | The application, with the fixes described below |
+
+## The database runs as a CONTAINER on a VM
+
+To be unambiguous: `terraform/10-db-multipass` provisions an **Ubuntu 24.04
+Multipass VM**, and Ansible then runs Oracle XE as a **Docker container on that
+VM**. There is no native Oracle install — `/opt/oracle/product` does not exist.
+
+```
+Multipass VM  oracle-db  10.2.243.x   Ubuntu 24.04
+  └── Docker
+        └── container `oracle-xe`  gvenzl/oracle-xe:21-slim
+              ├── listener 1521  (published 0.0.0.0:1521 via docker-proxy)
+              ├── PDB XEPDB1
+              └── datafiles bind-mounted -> /opt/oracle-data on the VM
+```
+
+Connection string, unchanged by any of this:
+
+```
+jdbc:oracle:thin:@//<db-vm-ip>:1521/XEPDB1
+```
+
+### Why a container rather than a native install
+
+Oracle ships XE as an RPM only. Converting it for Ubuntu with `alien` failed
+**four times across three distinct root causes**, each retry costing ~40 minutes
+(2.2 GB download + ~35 min conversion):
+
+1. **`alien` exits non-zero on success.** The RPM is unsigned for apt's purposes,
+   so rpm emits `Header V3 RSA/SHA256 Signature ... NOKEY` warnings and `alien`
+   propagates a failure code — aborting the play *after* a conversion that had
+   actually worked.
+2. **`libaio.so.1` does not exist on Ubuntu 24.04.** The t64 transition ships
+   `libaio.so.1t64`; Oracle's binaries link the historic SONAME, so `orabase`
+   died before DBCA ever started.
+3. **`netca` rejects Ubuntu's `127.0.1.1` hostname mapping** with
+   `No valid IP Address returned for the host oracle-db`.
+
+Fixing all three got the *listener* running, but DBCA then failed with
+`DBT-05509` inside its CVU prerequisite machinery.
+
+`gvenzl/oracle-xe` is the image Oracle's own developer advocate maintains for
+this purpose. It is **~2 GB, healthy in about 4 minutes**, needs no conversion,
+and creates the application schema itself from `APP_USER` / `APP_USER_PASSWORD` —
+which also retired the hand-written `create-app-schema.sql` and `listener.ora`
+templates.
+
+The VM is still worth having: it puts the database on `10.2.243.0/24` alongside
+the k8s nodes, so WebLogic pods reach the listener directly.
 
 ## Why every tier is on Multipass
 
@@ -83,11 +133,8 @@ make import
 make plan          # review the diffs carefully before applying
 ```
 
-Two protections exist because imported objects differ from the code:
+One protection exists because imported objects differ from the code:
 
-- `lxd_instance.nginx` ignores changes to `image`/`description`. An imported
-  instance reports no image, which Terraform reads as a change and would
-  **destroy and rebuild the working proxy**. To rebuild deliberately, taint it.
 - The WebLogic secrets ignore changes to `data`. Regenerating the admin password
   breaks a running domain, because it is baked into each server's
   `boot.properties` at creation time and the managed servers can then no longer
@@ -126,22 +173,70 @@ terraform apply -var ssh_public_key_path=~/.ssh/other.pub \
 > the file is present. A `precondition` reports the missing key with the fix
 > instead of an opaque evaluation error.
 
-## Critical constraint: Jenkins runs in Docker
+## Jenkins runs natively on the host
 
-The Jenkins container (`jenkins/jenkins:lts-jdk17`) has **only `git` and `ssh`** — no
-terraform, ansible, packer, kubectl, lxc or multipass. Those tools live on the host and
-cannot be usefully installed in the container, because they must drive host-level
-hypervisors (libvirt sockets, LXD unix socket, Multipass daemon).
+Jenkins is installed as a **host package** (`jenkins` apt package, systemd unit),
+not in Docker, and the pipelines execute on the **built-in node labelled
+`homelab`**.
 
-Therefore all pipelines run on an **SSH agent pointing back at the host**, label
-`homelab`. Bootstrap it once:
+This was a deliberate change. Jenkins originally ran as
+`jenkins/jenkins:lts-jdk17`, whose image has **only `git` and `ssh`** — no
+terraform, ansible, packer, kubectl or multipass. Those tools drive host-level
+hypervisors (the Multipass daemon socket, the k8s API), so they cannot be
+usefully containerised, and every pipeline needed an SSH agent pointing back at
+the host. Installing Jenkins natively removed that indirection entirely.
 
-```bash
-./jenkins/bootstrap-agent.sh
+Three host-specific details this requires:
+
+- **`JENKINS_HOME` must live under `/home`.** The package defaults to
+  `/var/lib/jenkins`, but snap-packaged tools refuse to run for a user whose home
+  is outside `/home` (`Sorry, home directories outside of /home needs
+  configuration`), which makes `multipass` unusable. Set via a systemd override.
+- **Terraform state is shared, not per-workspace.** See below.
+- **`multipass` needs a sudo fallback.** `local.passphrase` is set, so only the
+  VM owner is authenticated; the CI user goes through `sudo -n multipass`.
+
+### Terraform state must not live in a job workspace
+
+Jenkins gives every **job** its own workspace. State written by `homelab-iac`
+was therefore invisible to `homelab-teardown`, which reported
+
+```
+Destroy complete! Resources: 0 destroyed.
+Teardown complete. Everything destroyed, including data.
+Finished: SUCCESS
 ```
 
-Running the pipelines on Jenkins' built-in node will fail by design — see
-`jenkins/README.md`.
+while every VM kept running. A pipeline that claims to have destroyed everything
+and destroyed nothing is far more dangerous than one that fails loudly.
+
+All three stacks now pin a local backend at `/home/jenkins/tfstate/<stack>.tfstate`,
+outside any workspace, so plan/apply and teardown share one view of reality and a
+workspace wipe cannot orphan live infrastructure.
+
+### Jenkins credentials the pipelines expect
+
+| ID | Type | Purpose |
+|---|---|---|
+| `oracle-sys` | username/password | Oracle `SYS` |
+| `oracle-app` | username/password | Application schema (`customer_app`) |
+| `wls-admin` | username/password | WebLogic administrator |
+
+### Shell steps need an explicit bash shebang
+
+Jenkins' `sh` step runs `/bin/sh`, which is **dash** on Ubuntu, and dash has no
+`pipefail`. The shebang is only honoured as the first bytes of the script, so it
+must be glued to the opening quotes:
+
+```groovy
+sh '''#!/bin/bash
+    set -euo pipefail
+    ...
+'''
+```
+
+Written as `sh '''` followed by a newline, the shebang lands on line 2 and is
+silently ignored — the failure looks identical.
 
 ## Idempotency
 
@@ -153,7 +248,7 @@ second pass — `make plan` proves it.
 
 `db_mode` selects the persistence backend:
 
-- `oracle` (default) — Oracle XE on Multipass, shared across both managed servers
+- `oracle` (default) — Oracle XE as a **container on a Multipass VM**, shared across both managed servers
 - `h2` — embedded in-memory H2, per-pod dataset, no external dependency
 
 Set in `ansible/group_vars/all.yml` or override: `make app DB_MODE=h2`
