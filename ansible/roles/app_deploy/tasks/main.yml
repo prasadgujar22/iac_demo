@@ -17,13 +17,19 @@
     state: directory
     mode: "0755"
 
-- name: Clone or update the application repository
-  ansible.builtin.git:
-    repo: "{{ app_repo }}"
-    dest: "{{ app_build_dir }}/src"
-    version: "{{ app_repo_version }}"
-    force: true
-  register: app_checkout
+- name: Stage the vendored application source
+  # The application is VENDORED at app/customer-onboarding in this repo, so the
+  # build uses exactly the code that was reviewed alongside the IaC — no drift
+  # between what CI builds and what the repo contains.
+  #
+  # Previously this cloned the upstream repo, which failed in CI with
+  #   Failed to set a new url https://github.com/.../java_session_management_demo
+  # and would silently build different code from the vendored copy anyway.
+  ansible.builtin.copy:
+    src: "{{ repo_root }}/app/customer-onboarding/"
+    dest: "{{ app_build_dir }}/src/"
+    mode: preserve
+    remote_src: true
 
 - name: Apply the dialect-aware schema initialiser patch
   ansible.builtin.copy:

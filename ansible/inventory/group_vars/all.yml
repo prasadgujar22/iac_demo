@@ -82,3 +82,9 @@ proxy_listen_port: 80
 #
 # The lan_bridge role now reads it from the nginx host's inventory facts, so it
 # always follows the VM Terraform actually created.
+
+# --- repository root --------------------------------------------------------
+# Absolute path to this checkout. Derived from the inventory's own location so
+# it is correct whether the repo sits in a developer's home directory or in a
+# Jenkins job workspace — the two differ, and hardcoding either breaks the other.
+repo_root: "{{ (inventory_dir | dirname) | dirname }}"
