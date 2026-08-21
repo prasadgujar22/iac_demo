@@ -21,6 +21,11 @@ public class CustomerOnboardingServlet extends BaseServlet {
             return;
         }
 
+        // Presence of a non-blank "id" field distinguishes an edit (the edit
+        // form carries a hidden id input) from a new submission, which has none.
+        String idParam = trim(request.getParameter("id"));
+        boolean isEdit = !isBlank(idParam);
+
         Customer customer = new Customer();
         customer.setCustomerName(trim(request.getParameter("customerName")));
         customer.setCompanyName(trim(request.getParameter("companyName")));
@@ -36,13 +41,15 @@ public class CustomerOnboardingServlet extends BaseServlet {
         customer.setNotes(trim(request.getParameter("notes")));
         customer.setCreatedDate(LocalDate.now());
 
+        String backToTab = isEdit ? "onboarding&editId=" + idParam : "onboarding";
+
         if (isBlank(customer.getCustomerName())
                 || isBlank(customer.getCompanyName())
                 || isBlank(customer.getEmail())
                 || isBlank(customer.getOnboardingStatus())) {
             request.getSession().setAttribute("flashError",
                     "Customer name, company name, email, and onboarding status are required.");
-            response.sendRedirect(request.getContextPath() + "/dashboard?tab=onboarding");
+            response.sendRedirect(request.getContextPath() + "/dashboard?tab=" + backToTab);
             return;
         }
 
@@ -51,10 +58,30 @@ public class CustomerOnboardingServlet extends BaseServlet {
 
         try {
             customerDao.initializeSchema();
-            customerDao.save(customer);
-            request.getSession().setAttribute("flashMessage", "Customer details submitted successfully.");
+            if (isEdit) {
+                long id;
+                try {
+                    id = Long.parseLong(idParam);
+                } catch (NumberFormatException exception) {
+                    request.getSession().setAttribute("flashError", "Invalid customer id.");
+                    response.sendRedirect(request.getContextPath() + "/dashboard?tab=reports");
+                    return;
+                }
+                customer.setId(id);
+                boolean updated = customerDao.update(customer);
+                if (updated) {
+                    request.getSession().setAttribute("flashMessage", "Customer details updated successfully.");
+                } else {
+                    request.getSession().setAttribute("flashError",
+                            "Customer #" + id + " no longer exists; it may have been removed.");
+                }
+            } else {
+                customerDao.save(customer);
+                request.getSession().setAttribute("flashMessage", "Customer details submitted successfully.");
+            }
         } catch (SQLException exception) {
-            request.getSession().setAttribute("flashError", "Unable to save customer: " + exception.getMessage());
+            String verb = isEdit ? "update" : "save";
+            request.getSession().setAttribute("flashError", "Unable to " + verb + " customer: " + exception.getMessage());
         }
 
         response.sendRedirect(request.getContextPath() + "/dashboard?tab=reports");

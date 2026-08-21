@@ -131,6 +131,11 @@ textarea {
     color: #123c73;
 }
 
+.small-btn {
+    padding: 6px 12px;
+    font-size: 13px;
+}
+
 .alert {
     padding: 12px 14px;
     border-radius: 8px;

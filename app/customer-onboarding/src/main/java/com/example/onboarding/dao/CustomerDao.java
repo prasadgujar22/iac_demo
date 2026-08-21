@@ -98,6 +98,59 @@ public class CustomerDao {
         }
     }
 
+    /**
+     * Updates an existing record in place. CREATED_DATE is deliberately left
+     * untouched — editing a customer should not rewrite its onboarding date.
+     *
+     * @return true if a row with this id existed and was updated.
+     */
+    public boolean update(Customer customer) throws SQLException {
+        String sql = "UPDATE CUSTOMER_ONBOARDING SET "
+                + "CUSTOMER_NAME = ?, COMPANY_NAME = ?, EMAIL = ?, PHONE_NUMBER = ?, "
+                + "ADDRESS_LINE1 = ?, ADDRESS_LINE2 = ?, CITY = ?, STATE = ?, POSTAL_CODE = ?, "
+                + "COUNTRY = ?, ONBOARDING_STATUS = ?, NOTES = ? "
+                + "WHERE ID = ?";
+
+        try (Connection connection = ConnectionManager.getConnection(databaseConfig);
+             PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setString(1, customer.getCustomerName());
+            statement.setString(2, customer.getCompanyName());
+            statement.setString(3, customer.getEmail());
+            statement.setString(4, customer.getPhoneNumber());
+            statement.setString(5, customer.getAddressLine1());
+            statement.setString(6, customer.getAddressLine2());
+            statement.setString(7, customer.getCity());
+            statement.setString(8, customer.getState());
+            statement.setString(9, customer.getPostalCode());
+            statement.setString(10, customer.getCountry());
+            statement.setString(11, customer.getOnboardingStatus());
+            statement.setString(12, customer.getNotes());
+            statement.setLong(13, customer.getId());
+            return statement.executeUpdate() > 0;
+        }
+    }
+
+    /**
+     * Loads a single record by id, or null if it does not exist — e.g. the
+     * edit link was followed after another user or process deleted the row.
+     */
+    public Customer findById(long id) throws SQLException {
+        String sql = "SELECT ID, CUSTOMER_NAME, COMPANY_NAME, EMAIL, PHONE_NUMBER, ADDRESS_LINE1, ADDRESS_LINE2, "
+                + "CITY, STATE, POSTAL_CODE, COUNTRY, ONBOARDING_STATUS, NOTES, CREATED_DATE "
+                + "FROM CUSTOMER_ONBOARDING WHERE ID = ?";
+
+        try (Connection connection = ConnectionManager.getConnection(databaseConfig);
+             PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setLong(1, id);
+            try (ResultSet resultSet = statement.executeQuery()) {
+                if (!resultSet.next()) {
+                    return null;
+                }
+                return mapRow(resultSet);
+            }
+        }
+    }
+
     public List<Customer> findAll() throws SQLException {
         String sql = "SELECT ID, CUSTOMER_NAME, COMPANY_NAME, EMAIL, PHONE_NUMBER, ADDRESS_LINE1, ADDRESS_LINE2, "
                 + "CITY, STATE, POSTAL_CODE, COUNTRY, ONBOARDING_STATUS, NOTES, CREATED_DATE "
@@ -108,26 +161,30 @@ public class CustomerDao {
              PreparedStatement statement = connection.prepareStatement(sql);
              ResultSet resultSet = statement.executeQuery()) {
             while (resultSet.next()) {
-                Customer customer = new Customer();
-                customer.setId(resultSet.getLong("ID"));
-                customer.setCustomerName(resultSet.getString("CUSTOMER_NAME"));
-                customer.setCompanyName(resultSet.getString("COMPANY_NAME"));
-                customer.setEmail(resultSet.getString("EMAIL"));
-                customer.setPhoneNumber(resultSet.getString("PHONE_NUMBER"));
-                customer.setAddressLine1(resultSet.getString("ADDRESS_LINE1"));
-                customer.setAddressLine2(resultSet.getString("ADDRESS_LINE2"));
-                customer.setCity(resultSet.getString("CITY"));
-                customer.setState(resultSet.getString("STATE"));
-                customer.setPostalCode(resultSet.getString("POSTAL_CODE"));
-                customer.setCountry(resultSet.getString("COUNTRY"));
-                customer.setOnboardingStatus(resultSet.getString("ONBOARDING_STATUS"));
-                customer.setNotes(resultSet.getString("NOTES"));
-                Date createdDate = resultSet.getDate("CREATED_DATE");
-                customer.setCreatedDate(createdDate == null ? LocalDate.now() : createdDate.toLocalDate());
-                customers.add(customer);
+                customers.add(mapRow(resultSet));
             }
         }
 
         return customers;
+    }
+
+    private Customer mapRow(ResultSet resultSet) throws SQLException {
+        Customer customer = new Customer();
+        customer.setId(resultSet.getLong("ID"));
+        customer.setCustomerName(resultSet.getString("CUSTOMER_NAME"));
+        customer.setCompanyName(resultSet.getString("COMPANY_NAME"));
+        customer.setEmail(resultSet.getString("EMAIL"));
+        customer.setPhoneNumber(resultSet.getString("PHONE_NUMBER"));
+        customer.setAddressLine1(resultSet.getString("ADDRESS_LINE1"));
+        customer.setAddressLine2(resultSet.getString("ADDRESS_LINE2"));
+        customer.setCity(resultSet.getString("CITY"));
+        customer.setState(resultSet.getString("STATE"));
+        customer.setPostalCode(resultSet.getString("POSTAL_CODE"));
+        customer.setCountry(resultSet.getString("COUNTRY"));
+        customer.setOnboardingStatus(resultSet.getString("ONBOARDING_STATUS"));
+        customer.setNotes(resultSet.getString("NOTES"));
+        Date createdDate = resultSet.getDate("CREATED_DATE");
+        customer.setCreatedDate(createdDate == null ? LocalDate.now() : createdDate.toLocalDate());
+        return customer;
     }
 }

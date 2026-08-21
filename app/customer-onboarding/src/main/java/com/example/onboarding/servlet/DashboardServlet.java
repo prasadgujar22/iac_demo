@@ -1,6 +1,7 @@
 package com.example.onboarding.servlet;
 
 import com.example.onboarding.dao.CustomerDao;
+import com.example.onboarding.model.Customer;
 import com.example.onboarding.util.DatabaseConfig;
 
 import javax.servlet.ServletException;
@@ -30,6 +31,23 @@ public class DashboardServlet extends BaseServlet {
         try {
             customerDao.initializeSchema();
             request.setAttribute("customers", customerDao.findAll());
+
+            // ?tab=onboarding&editId=N loads that record into the form so it
+            // doubles as both the "new customer" and "edit customer" screen.
+            String editIdParam = request.getParameter("editId");
+            if ("onboarding".equals(activeTab) && editIdParam != null && !editIdParam.isBlank()) {
+                try {
+                    long editId = Long.parseLong(editIdParam.trim());
+                    Customer editCustomer = customerDao.findById(editId);
+                    if (editCustomer == null) {
+                        request.getSession().setAttribute("flashError", "Customer #" + editId + " was not found.");
+                    } else {
+                        request.setAttribute("editCustomer", editCustomer);
+                    }
+                } catch (NumberFormatException exception) {
+                    request.getSession().setAttribute("flashError", "Invalid customer id.");
+                }
+            }
         } catch (SQLException exception) {
             request.setAttribute("databaseError", exception.getMessage());
         }
