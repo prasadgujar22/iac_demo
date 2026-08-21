@@ -36,7 +36,8 @@ pipeline {
                 // Deploying into a domain whose servers are in ADMIN mode appears to
                 // succeed but the application never activates. Refuse to proceed.
                 sh """
-                    set -euo pipefail
+                    #!/bin/bash
+set -euo pipefail
                     STATES=\$(kubectl get domain wlsdomain -n wls-domain \\
                         -o jsonpath='{range .status.servers[*]}{.serverName}={.state} {end}')
                     echo "domain server states: \$STATES"
@@ -57,7 +58,8 @@ pipeline {
                     usernameVariable: 'ORA_APP_USER',
                     passwordVariable: 'ORA_APP_PASS')]) {
                     sh """
-                        set -euo pipefail
+                        #!/bin/bash
+set -euo pipefail
                         cd ansible
                         ansible-playbook playbooks/deploy-app.yml \\
                           -e "db_mode=\${DB_MODE}" \\
@@ -73,7 +75,8 @@ pipeline {
             when { expression { !params.SKIP_VERIFY } }
             steps {
                 sh """
-                    set -euo pipefail
+                    #!/bin/bash
+set -euo pipefail
                     cd ansible
                     ansible-playbook playbooks/site.yml --tags verify -e "db_mode=\${DB_MODE}"
                 """
