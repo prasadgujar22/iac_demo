@@ -73,8 +73,7 @@ pipeline {
             parallel {
                 stage('terraform') {
                     steps {
-                        sh '''
-                            #!/bin/bash
+                        sh '''#!/bin/bash
 set -euo pipefail
                             for d in terraform/*/; do
                                 echo "--- validating $d"
@@ -86,8 +85,7 @@ set -euo pipefail
                 }
                 stage('ansible') {
                     steps {
-                        sh '''
-                            #!/bin/bash
+                        sh '''#!/bin/bash
 set -euo pipefail
                             cd ansible
                             ansible-playbook playbooks/site.yml --syntax-check
@@ -97,8 +95,7 @@ set -euo pipefail
                 }
                 stage('packer') {
                     steps {
-                        sh '''
-                            #!/bin/bash
+                        sh '''#!/bin/bash
 set -euo pipefail
                             cd packer/wls-domain-image
                             packer init .
@@ -116,8 +113,7 @@ set -euo pipefail
                     credentialsId: 'wls-admin',
                     usernameVariable: 'WLS_USER',
                     passwordVariable: 'WLS_PASS')]) {
-                    sh '''
-                        #!/bin/bash
+                    sh '''#!/bin/bash
 set -euo pipefail
                         cd packer/wls-domain-image
                         # Tag by build number so a bad image can be rolled back.
@@ -138,8 +134,7 @@ set -euo pipefail
                         ? ['10-db-multipass', '20-wls-k8s', '30-nginx-multipass']
                         : ['20-wls-k8s', '30-nginx-multipass']
                     stacks.each { s ->
-                        sh """
-                            #!/bin/bash
+                        sh """#!/bin/bash
 set -euo pipefail
                             terraform -chdir=terraform/${s} init -no-color
                             terraform -chdir=terraform/${s} plan -no-color -out=tfplan
@@ -193,8 +188,7 @@ set -euo pipefail
                         // Skip the app tag when DEPLOY_APP is false; there is no
                         // shell-side conditional in --skip-tags.
                         def skip = params.DEPLOY_APP ? '' : '--skip-tags app'
-                        sh """
-                            #!/bin/bash
+                        sh """#!/bin/bash
 set -euo pipefail
                             cd ansible
                             ansible-playbook playbooks/site.yml \
@@ -222,8 +216,7 @@ set -euo pipefail
                     credentialsId: 'oracle-app',
                     usernameVariable: 'ORA_APP_USER',
                     passwordVariable: 'ORA_APP_PASS')]) {
-                    sh '''
-                        #!/bin/bash
+                    sh '''#!/bin/bash
 set -euo pipefail
                         cd ansible
                         ansible-playbook playbooks/deploy-app.yml \
@@ -240,8 +233,7 @@ set -euo pipefail
             steps {
                 // Real HTTP assertions: session affinity across the login handover,
                 // distribution across servers, and a write-then-read round trip.
-                sh '''
-                    #!/bin/bash
+                sh '''#!/bin/bash
 set -euo pipefail
                     cd ansible
                     ansible-playbook playbooks/site.yml --tags verify -e "db_mode=${DB_MODE}"

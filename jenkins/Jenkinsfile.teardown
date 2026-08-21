@@ -41,8 +41,7 @@ pipeline {
         stage('Stop LAN forwards') {
             steps {
                 // Remove the bridges first so nothing keeps probing dying backends.
-                sh '''
-                    #!/bin/bash
+                sh '''#!/bin/bash
 set -uo pipefail
                     sudo systemctl disable --now wls-lan-forward.service 2>/dev/null || true
                     echo "LAN forwards stopped"
