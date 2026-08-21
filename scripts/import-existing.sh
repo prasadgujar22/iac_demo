@@ -10,7 +10,7 @@
 # are skipped, and it never creates or destroys anything.
 #
 # Usage:  ./scripts/import-existing.sh [stack]
-#         stack = 20-wls-k8s | 30-nginx-microcloud | all   (default: all)
+#         stack = 20-wls-k8s | all   (default: all)
 #
 set -uo pipefail
 
@@ -83,22 +83,12 @@ if [[ "$STACK" == "all" || "$STACK" == "20-wls-k8s" ]]; then
 fi
 
 # ---------------------------------------------------------------------------
-# 30-nginx-microcloud
+# 30-nginx-multipass
 # ---------------------------------------------------------------------------
-if [[ "$STACK" == "all" || "$STACK" == "30-nginx-microcloud" ]]; then
-    D="$ROOT/terraform/30-nginx-microcloud"
-    echo "== 30-nginx-microcloud =="
-    terraform -chdir="$D" init -no-color -input=false >/dev/null 2>&1
-
-    import_one "$D" "lxd_instance.nginx" "$LXD_INSTANCE" \
-        "sudo lxc info $LXD_INSTANCE" || RC=1
-
-    # The LXD provider requires a leading [remote:][project] segment, so the ID
-    # is "/<network>/<listen_address>" — a bare "network/address" is rejected
-    # with "Import ID does not contain all required fields".
-    import_one "$D" "lxd_network_forward.proxy" "/${LXD_NETWORK}/${LXD_FORWARD}" \
-        "sudo lxc network forward show $LXD_NETWORK $LXD_FORWARD" || RC=1
-fi
+# Nothing to import: the proxy VM is created by a null_resource driving the
+# multipass CLI, which has no importable identity. If the VM already exists,
+# the create guard in main.tf skips the launch and Terraform simply adopts it
+# on the next apply.
 
 echo
 if [ "$RC" -eq 0 ]; then

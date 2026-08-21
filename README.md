@@ -37,7 +37,7 @@ the k8s nodes, so pods reach it directly. The platform choice is the fix.
 | `packer/wls-domain-image/` | Packer | Build `wls-domain-image` from the Oracle WLS base + WDT model |
 | `terraform/10-db-multipass/` | Terraform | Multipass VM for Oracle XE |
 | `terraform/20-wls-k8s/` | Terraform | Namespace, secrets, Domain/Cluster CRs, per-server NodePorts |
-| `terraform/30-nginx-microcloud/` | Terraform | LXD VM, static IP, OVN network forwards |
+| `terraform/30-nginx-multipass/` | Terraform | Multipass VM for nginx, on the k8s subnet |
 | `ansible/` | Ansible | Oracle XE bootstrap, app build+deploy, socat unit, nginx config |
 | `jenkins/` | Jenkins | Pipelines: full infra, app-only redeploy, teardown |
 

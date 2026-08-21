@@ -39,6 +39,16 @@ else
     log "added {{ ms.lan_ip }} to $NIC"
 fi
 {% endfor %}
+{% if proxy_internal_ip is defined and proxy_internal_ip | length > 0 %}
+# The nginx proxy also lives on the Multipass network now, so the host must
+# publish it too; a Multipass VM has no routable LAN address of its own.
+if ip -4 addr show "$NIC" | grep -q "inet {{ proxy_lan_ip }}/"; then
+    log "{{ proxy_lan_ip }} already present"
+else
+    ip addr add "{{ proxy_lan_ip }}/24" dev "$NIC" || { log "FATAL: cannot add {{ proxy_lan_ip }}"; exit 1; }
+    log "added {{ proxy_lan_ip }} to $NIC"
+fi
+{% endif %}
 
 PIDS=()
 cleanup() {
@@ -54,6 +64,11 @@ socat TCP-LISTEN:{{ ms.lan_port }},bind={{ ms.lan_ip }},reuseaddr,fork TCP:${TAR
 PIDS+=("$!")
 log "forwarding {{ ms.lan_ip }}:{{ ms.lan_port }} -> ${TARGET_HOST}:{{ ms.nodeport }} ({{ ms.name }}, pid $!)"
 {% endfor %}
+{% if proxy_internal_ip is defined and proxy_internal_ip | length > 0 %}
+socat TCP-LISTEN:{{ proxy_listen_port }},bind={{ proxy_lan_ip }},reuseaddr,fork TCP:{{ proxy_internal_ip }}:{{ proxy_listen_port }} &
+PIDS+=("$!")
+log "forwarding {{ proxy_lan_ip }}:{{ proxy_listen_port }} -> {{ proxy_internal_ip }}:{{ proxy_listen_port }} (nginx proxy, pid $!)"
+{% endif %}
 
 log "all forwards up; supervising"
 wait -n "${PIDS[@]}"

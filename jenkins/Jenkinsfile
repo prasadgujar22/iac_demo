@@ -131,8 +131,8 @@ pipeline {
                 script {
                     // 10-db is skipped entirely in h2 mode — no database to provision.
                     def stacks = params.DB_MODE == 'oracle'
-                        ? ['10-db-multipass', '20-wls-k8s', '30-nginx-microcloud']
-                        : ['20-wls-k8s', '30-nginx-microcloud']
+                        ? ['10-db-multipass', '20-wls-k8s', '30-nginx-multipass']
+                        : ['20-wls-k8s', '30-nginx-multipass']
                     stacks.each { s ->
                         sh """
                             set -euo pipefail
@@ -162,8 +162,8 @@ pipeline {
             steps {
                 script {
                     def stacks = params.DB_MODE == 'oracle'
-                        ? ['10-db-multipass', '20-wls-k8s', '30-nginx-microcloud']
-                        : ['20-wls-k8s', '30-nginx-microcloud']
+                        ? ['10-db-multipass', '20-wls-k8s', '30-nginx-multipass']
+                        : ['20-wls-k8s', '30-nginx-multipass']
                     stacks.each { s ->
                         sh "terraform -chdir=terraform/${s} apply -no-color tfplan"
                     }

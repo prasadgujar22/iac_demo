@@ -32,7 +32,7 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__fi
 
 GENERATED = [
     os.path.join(REPO_ROOT, "terraform", "10-db-multipass", ".generated", "db_inventory.yaml"),
-    os.path.join(REPO_ROOT, "terraform", "30-nginx-microcloud", ".generated", "nginx_inventory.yaml"),
+    os.path.join(REPO_ROOT, "terraform", "30-nginx-multipass", ".generated", "nginx_inventory.yaml"),
 ]
 
 

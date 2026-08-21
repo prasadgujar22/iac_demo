@@ -11,9 +11,9 @@ AP          := ansible-playbook
 
 # 10-db is skipped in h2 mode: there is no database to provision.
 ifeq ($(DB_MODE),oracle)
-STACKS := 10-db-multipass 20-wls-k8s 30-nginx-microcloud
+STACKS := 10-db-multipass 20-wls-k8s 30-nginx-multipass
 else
-STACKS := 20-wls-k8s 30-nginx-microcloud
+STACKS := 20-wls-k8s 30-nginx-multipass
 endif
 
 .PHONY: help preflight validate init plan infra app verify destroy fmt clean ssh-key import
@@ -101,7 +101,7 @@ destroy: ## Destroy infrastructure (DESTRUCTIVE — prompts twice)
 	@echo "This destroys the nginx and WebLogic tiers."
 	@read -p "Type DESTROY to continue: " a; \
 	  [[ "$$a" == "DESTROY" ]] || { echo "aborted"; exit 1; }
-	@$(TF) -chdir=terraform/30-nginx-microcloud destroy -auto-approve -no-color
+	@$(TF) -chdir=terraform/30-nginx-multipass destroy -auto-approve -no-color
 	@$(TF) -chdir=terraform/20-wls-k8s destroy -auto-approve -no-color
 	@echo "Database tier retained. To remove it (DELETES ALL DATA):"
 	@echo "  terraform -chdir=terraform/10-db-multipass destroy"

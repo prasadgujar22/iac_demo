@@ -48,6 +48,17 @@ k8s_master_ip: 10.2.243.69
 
 # Each managed server is published on its own LAN address so nginx can route by
 # WebLogic JVM route ID for session affinity.
+# Each managed server is reachable three ways:
+#   nodeport            — direct on the k8s node; usable by anything on
+#                         10.2.243.0/24, which now includes the nginx VM
+#   lan_ip:lan_port     — published on the physical LAN by host socat bridges,
+#                         for clients outside the Multipass network
+#
+# Since nginx moved from MicroCloud to Multipass it shares the k8s subnet, so
+# it proxies to NodePorts DIRECTLY. Previously it had to hairpin out to the
+# LAN and back through socat, because the OVN subnet could not reach 10.2.243.x.
+k8s_node_ip: 10.2.243.69
+
 managed_servers:
   - name: ms1
     nodeport: 30701

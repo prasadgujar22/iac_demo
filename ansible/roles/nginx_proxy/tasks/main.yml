@@ -9,8 +9,12 @@
 - name: Discover the JVM route ID of each managed server
   # WebLogic embeds the owning server's JVM ID in the session cookie:
   #   JSESSIONID=<sessionid>!<primaryJVMID>[!<secondaryJVMID>]
+  #
+  # Probed via the NodePort, which is what nginx itself will proxy to now that
+  # it shares the 10.2.243.0/24 subnet with the k8s nodes. Probing a different
+  # path than the one nginx uses would risk discovering IDs that do not match.
   ansible.builtin.uri:
-    url: "http://{{ item.lan_ip }}:{{ item.lan_port }}{{ app_context_root }}/login"
+    url: "http://{{ k8s_node_ip }}:{{ item.nodeport }}{{ app_context_root }}/login"
     method: GET
     return_content: false
     status_code: [200, 302]
@@ -31,8 +35,8 @@
     wls_routes: >-
       {{ wls_routes | default([]) + [{
         'name':     item.item.name,
-        'lan_ip':   item.item.lan_ip,
-        'lan_port': item.item.lan_port,
+        'lan_ip':   k8s_node_ip,
+        'lan_port': item.item.nodeport,
         'route_id': (item.set_cookie | default('')
                      | regex_search('JSESSIONID=[^;]*?(![-0-9]+)', '\\1') | first | default(''))
       }] }}

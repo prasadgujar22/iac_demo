@@ -51,7 +51,7 @@ pipeline {
 
         stage('Destroy nginx tier') {
             steps {
-                sh 'terraform -chdir=terraform/30-nginx-microcloud destroy -auto-approve -no-color'
+                sh 'terraform -chdir=terraform/30-nginx-multipass destroy -auto-approve -no-color'
             }
         }
 

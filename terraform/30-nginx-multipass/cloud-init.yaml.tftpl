@@ -1,0 +1,28 @@
+#cloud-config
+# Proxy VM bootstrap. Installs nginx so Ansible has a service to configure;
+# all routing/affinity configuration is applied by the nginx_proxy role.
+package_update: true
+package_upgrade: false
+
+packages:
+  - nginx
+  - curl
+
+users:
+  - name: ubuntu
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    shell: /bin/bash
+    ssh_authorized_keys:
+      - ${ssh_authorized_key}
+
+write_files:
+  - path: /etc/sysctl.d/99-proxy.conf
+    content: |
+      # A reverse proxy opens many short-lived upstream connections.
+      net.ipv4.ip_local_port_range = 10240 65535
+      net.core.somaxconn = 1024
+
+runcmd:
+  - sysctl --system
+  - systemctl enable --now nginx
+  - touch /var/lib/cloud/nginx-prereqs-done
