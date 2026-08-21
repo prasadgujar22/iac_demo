@@ -5,6 +5,18 @@
 # host can route into, so NodePorts are not LAN-reachable. Secondary addresses on
 # the primary NIC plus socat bridge the gap.
 
+- name: Resolve the proxy VM address from the nginx host's inventory facts
+  # Must come from the nginx host, never a group_var: the VM is recreated by
+  # Terraform (and gets a new Multipass IP) far more often than group_vars is
+  # edited. A hardcoded value here previously pointed the LAN bridge at a
+  # deleted MicroCloud VM while nginx itself was perfectly healthy.
+  ansible.builtin.set_fact:
+    proxy_internal_ip: >-
+      {{ hostvars[groups['nginx'][0]]['proxy_internal_ip']
+         | default(hostvars[groups['nginx'][0]]['ansible_host'])
+         | default('') }}
+  when: groups['nginx'] | default([]) | length > 0
+
 - name: Assert the primary NIC still holds its address
   # This NIC is the host's only LAN path. If it looks wrong, stop immediately
   # rather than risk touching networking.

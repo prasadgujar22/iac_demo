@@ -31,14 +31,19 @@
   changed_when: false
 
 - name: Extract route IDs from the Set-Cookie headers
+  # The uri module exposes the header as `set_cookie` on some versions and only
+  # inside `cookies_string` on others, so check both. regex_search returns None
+  # when nothing matches and `| first` then explodes with
+  #   'NoneType' object has no attribute 'group'
+  # hence the explicit default('') before any further filtering.
   ansible.builtin.set_fact:
     wls_routes: >-
       {{ wls_routes | default([]) + [{
         'name':     item.item.name,
         'lan_ip':   k8s_node_ip,
         'lan_port': item.item.nodeport,
-        'route_id': (item.set_cookie | default('')
-                     | regex_search('JSESSIONID=[^;]*?(![-0-9]+)', '\\1') | first | default(''))
+        'route_id': ((item.set_cookie | default(item.cookies_string | default('')))
+                     | regex_search('![-0-9]+') | default('', true))
       }] }}
   loop: "{{ route_probe.results }}"
   loop_control:
@@ -80,7 +85,11 @@
     owner: root
     group: root
     mode: "0644"
-    validate: "nginx -t -c /etc/nginx/nginx.conf"
+    # No `validate:` here. Ansible requires a %s placeholder for the temp file,
+    # but this is a site FRAGMENT — its server{} block is only legal inside the
+    # http{} context of the main config, so `nginx -t -c <fragment>` fails even
+    # when the fragment is perfectly correct. Validation happens in the next
+    # task, through the main config that includes it.
   become: true
   notify: reload nginx
 
@@ -91,6 +100,22 @@
     state: link
   become: true
   notify: reload nginx
+
+- name: Remove the default site
+  # Its catch-all server block would otherwise answer on port 80 ahead of ours.
+  ansible.builtin.file:
+    path: /etc/nginx/sites-enabled/default
+    state: absent
+  become: true
+  notify: reload nginx
+
+- name: Validate the full nginx configuration
+  # Run AFTER the fragment is linked in, so the server{} block is checked in its
+  # real http{} context. Failing here stops a broken config reaching a reload.
+  ansible.builtin.command:
+    cmd: nginx -t
+  become: true
+  changed_when: false
 
 - name: Ensure nginx is enabled and running
   ansible.builtin.systemd:

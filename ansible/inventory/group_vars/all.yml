@@ -72,4 +72,13 @@ managed_servers:
 # --- nginx proxy -----------------------------------------------------------
 proxy_lan_ip:      192.168.29.200
 proxy_listen_port: 80
-proxy_internal_ip: 10.184.135.2
+# proxy_internal_ip is deliberately NOT set here.
+#
+# It was hardcoded to the old MicroCloud VM (10.184.135.2) and silently survived
+# the move to Multipass: the nginx host got the correct address from Terraform's
+# generated inventory, but `control` — which builds the socat bridge — kept
+# using this stale group_var and forwarded 192.168.29.200:80 to a VM that no
+# longer exists. nginx answered fine internally while the LAN endpoint hung.
+#
+# The lan_bridge role now reads it from the nginx host's inventory facts, so it
+# always follows the VM Terraform actually created.

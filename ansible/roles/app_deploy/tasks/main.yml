@@ -99,16 +99,22 @@
 - name: Assert every managed server is in RUNNING mode (not ADMIN)
   # A server in ADMIN mode accepts a deployment that then never activates.
   # Pod readiness alone is NOT proof of RUNNING mode.
-  ansible.builtin.command:
+  #
+  # Uses `shell`, not `command`: ansible.builtin.command does not invoke a shell,
+  # so it strips the quotes around the server name and kubectl reports
+  #   unrecognized identifier ms1
+  # which looks exactly like the server being unhealthy. Reading all states and
+  # filtering here avoids depending on jsonpath quoting altogether.
+  ansible.builtin.shell:
     cmd: >-
       kubectl get domain {{ wls_domain_uid }} -n {{ wls_namespace }}
-      -o jsonpath={.status.servers[?(@.serverName=='{{ item.name }}')].state}
+      -o jsonpath='{range .status.servers[*]}{.serverName}={.state} {end}'
   register: ms_state
   changed_when: false
-  failed_when: "'RUNNING' not in ms_state.stdout"
   retries: 20
   delay: 15
-  until: "'RUNNING' in ms_state.stdout"
+  until: "item.name + '=RUNNING' in ms_state.stdout"
+  failed_when: "item.name + '=RUNNING' not in ms_state.stdout"
   loop: "{{ managed_servers }}"
   loop_control:
     label: "{{ item.name }}"
