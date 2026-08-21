@@ -56,7 +56,11 @@ fi
 
 hdr "Multipass (database tier)"
 if command -v multipass >/dev/null 2>&1; then
-    if multipass list >/dev/null 2>&1; then
+    # Multipass requires client authentication (local.passphrase is set), and
+    # the CI user has no passphrase of its own. root bypasses it, so fall back
+    # to sudo — CI runs as the `jenkins` user with passwordless sudo, while an
+    # interactive run as the VM owner succeeds on the first branch.
+    if multipass list >/dev/null 2>&1 || sudo -n multipass list >/dev/null 2>&1; then
         ok "multipass daemon responding"
     else
         bad "multipass daemon not responding"
