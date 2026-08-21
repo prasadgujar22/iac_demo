@@ -27,6 +27,28 @@
         db_tf: "{{ lookup('ansible.builtin.file', db_inv.stat.path) | from_yaml }}"
       when: db_inv.stat.exists
 
+    - name: Fall back to the shared Terraform state for the database host
+      # The generated inventory only exists in the workspace that ran `apply`.
+      # Other Jenkins jobs have their own workspaces, so the file is absent and
+      # the host would silently resolve to '' — rendering a JDBC URL against
+      # localhost and failing later as ORA-12541. The shared state backend is
+      # authoritative and visible to every job.
+      #
+      # `init` first: a workspace that never initialised this stack fails with
+      # "Backend initialization required" on `output` alone.
+      ansible.builtin.shell:
+        cmd: >-
+          terraform -chdir={{ repo_root }}/terraform/10-db-multipass
+          init -reconfigure -no-color -input=false >/dev/null 2>&1;
+          terraform -chdir={{ repo_root }}/terraform/10-db-multipass
+          output -raw db_host 2>/dev/null
+      register: db_host_tf
+      changed_when: false
+      failed_when: false
+      when:
+        - db_mode == 'oracle'
+        - not db_inv.stat.exists
+
     - name: Derive the database host from the Terraform-generated inventory
       # The expression must be self-guarding: Ansible finalizes set_fact args
       # BEFORE evaluating `when`, so a `when` guard does not prevent an
@@ -35,7 +57,9 @@
         oracle_db_host: >-
           {{ (db_tf | default({}, true))
              | community.general.json_query('db.hosts.*.ansible_host')
-             | default([], true) | first | default(oracle_db_host | default(''), true) }}
+             | default([], true) | first
+             | default(((db_host_tf | default({})).stdout | default('', true)) | trim, true)
+             | default(oracle_db_host | default(''), true) }}
       when: db_mode == 'oracle'
 
     - name: Require a database host when running in oracle mode
@@ -43,9 +67,11 @@
         that:
           - oracle_db_host is defined
           - oracle_db_host | length > 0
+          - oracle_db_host != 'localhost'
         fail_msg: >-
           db_mode=oracle but no database host is known. Apply
           terraform/10-db-multipass first, or run with -e db_mode=h2.
+        success_msg: "database host resolved: {{ oracle_db_host }}"
       when: db_mode == 'oracle'
 
 - name: Configure the Oracle XE database tier
