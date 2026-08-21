@@ -136,7 +136,12 @@ set -euo pipefail
                     stacks.each { s ->
                         sh """#!/bin/bash
 set -euo pipefail
-                            terraform -chdir=terraform/${s} init -no-color
+                            # -reconfigure: the workspace may hold a stale local state file from a
+                            # previous run, and terraform then asks interactively whether to migrate
+                            # it to the configured backend. With -input=false that becomes the
+                            # opaque "Error: input is disabled". The shared backend is the source of
+                            # truth, so discard any workspace-local backend config.
+                            terraform -chdir=terraform/${s} init -reconfigure -no-color -input=false
                             terraform -chdir=terraform/${s} plan -no-color -out=tfplan
                         """
                     }

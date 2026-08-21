@@ -56,7 +56,7 @@ set -uo pipefail
                     # `init` before `destroy`: a fresh CI workspace has no provider
                     # plugins, and destroy fails with "Inconsistent dependency lock
                     # file ... no version is selected" before touching anything.
-                    terraform -chdir=terraform/30-nginx-multipass init -no-color -input=false
+                    terraform -chdir=terraform/30-nginx-multipass init -reconfigure -no-color -input=false
                     terraform -chdir=terraform/30-nginx-multipass destroy -auto-approve -no-color
                 '''
             }
@@ -69,7 +69,7 @@ set -uo pipefail
                     # `init` before `destroy`: a fresh CI workspace has no provider
                     # plugins, and destroy fails with "Inconsistent dependency lock
                     # file ... no version is selected" before touching anything.
-                    terraform -chdir=terraform/20-wls-k8s init -no-color -input=false
+                    terraform -chdir=terraform/20-wls-k8s init -reconfigure -no-color -input=false
                     terraform -chdir=terraform/20-wls-k8s destroy -auto-approve -no-color
                 '''
             }
@@ -83,7 +83,7 @@ set -uo pipefail
                     # `init` before `destroy`: a fresh CI workspace has no provider
                     # plugins, and destroy fails with "Inconsistent dependency lock
                     # file ... no version is selected" before touching anything.
-                    terraform -chdir=terraform/10-db-multipass init -no-color -input=false
+                    terraform -chdir=terraform/10-db-multipass init -reconfigure -no-color -input=false
                     terraform -chdir=terraform/10-db-multipass destroy -auto-approve -no-color
                 '''
             }
