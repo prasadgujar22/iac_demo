@@ -1,15 +1,5 @@
 ---
 # Build the application WAR and deploy it to the WebLogic cluster.
-#
-# Two upstream application bugs are patched here rather than forked, so the
-# repository stays the source of truth:
-#
-#  1. The schema initialiser emits an Oracle PL/SQL anonymous block, which H2
-#     cannot parse (H2 error 42000-224). Made dialect-aware.
-#  2. DriverManager cannot see JDBC drivers in WEB-INF/lib because it is loaded
-#     by the SYSTEM classloader, so its ServiceLoader scan misses the webapp.
-#     Symptom: "No suitable driver found" despite the jar being present.
-#     Fixed with an explicit Class.forName plus a direct Driver.connect fallback.
 
 - name: Ensure build directory exists
   ansible.builtin.file:
@@ -30,20 +20,6 @@
     dest: "{{ app_build_dir }}/src/"
     mode: preserve
     remote_src: true
-
-- name: Apply the dialect-aware schema initialiser patch
-  ansible.builtin.copy:
-    src: CustomerDao.java
-    dest: "{{ app_build_dir }}/src/src/main/java/com/example/onboarding/dao/CustomerDao.java"
-    mode: "0644"
-  register: dao_patch
-
-- name: Apply the JDBC driver classloader patch
-  ansible.builtin.copy:
-    src: ConnectionManager.java
-    dest: "{{ app_build_dir }}/src/src/main/java/com/example/onboarding/util/ConnectionManager.java"
-    mode: "0644"
-  register: cm_patch
 
 - name: Ensure the required JDBC driver is a dependency
   # H2 for embedded mode, ojdbc11 for Oracle. Both are declared so db_mode can be
