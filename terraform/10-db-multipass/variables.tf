@@ -17,9 +17,15 @@ variable "cpus" {
 }
 
 variable "memory" {
-  description = "RAM. Oracle XE requires >= 2G; 4G avoids swap thrash during install."
+  description = <<-EOT
+    RAM. Oracle XE requires >= 2G to start at all.
+
+    6G rather than 4G because the `configure` step builds the SGA/PGA and spikes
+    well above steady-state usage; the host has ample headroom and an OOM
+    part-way through a 40-minute install is expensive to retry.
+  EOT
   type        = string
-  default     = "4G"
+  default     = "6G"
 }
 
 variable "disk" {
