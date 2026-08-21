@@ -1,0 +1,53 @@
+<?xml version='1.1' encoding='UTF-8'?>
+<!--
+  Job definition template. Placeholders are substituted by create-jobs.sh:
+    @@DESCRIPTION@@  human-readable job description
+    @@REPO_URL@@     git remote to clone
+    @@BRANCH@@       branch spec, e.g. */main
+    @@SCRIPT_PATH@@  path to the Jenkinsfile within the repo
+
+  Kept in the repo because jobs created by hand in the UI exist only on the
+  Jenkins controller's disk. Losing that disk loses the jobs, and nothing in
+  version control describes how to recreate them.
+-->
+<flow-definition plugin="workflow-job">
+  <description>@@DESCRIPTION@@</description>
+  <keepDependencies>false</keepDependencies>
+  <properties>
+    <jenkins.model.BuildDiscarderProperty>
+      <strategy class="hudson.tasks.LogRotator">
+        <daysToKeep>30</daysToKeep>
+        <numToKeep>30</numToKeep>
+        <artifactDaysToKeep>-1</artifactDaysToKeep>
+        <artifactNumToKeep>-1</artifactNumToKeep>
+      </strategy>
+    </jenkins.model.BuildDiscarderProperty>
+  </properties>
+  <definition class="org.jenkinsci.plugins.workflow.cps.CpsScmFlowDefinition" plugin="workflow-cps">
+    <scm class="hudson.plugins.git.GitSCM" plugin="git">
+      <configVersion>2</configVersion>
+      <userRemoteConfigs>
+        <hudson.plugins.git.UserRemoteConfig>
+          <url>@@REPO_URL@@</url>
+        </hudson.plugins.git.UserRemoteConfig>
+      </userRemoteConfigs>
+      <branches>
+        <hudson.plugins.git.BranchSpec>
+          <name>@@BRANCH@@</name>
+        </hudson.plugins.git.BranchSpec>
+      </branches>
+      <doGenerateSubmoduleConfigurations>false</doGenerateSubmoduleConfigurations>
+      <!--
+        No CleanBeforeCheckout / WipeWorkspace extension.
+        Terraform state is deliberately kept OUTSIDE the workspace (see
+        terraform/*/backend.tf), but provider plugin caches in .terraform/ are
+        expensive to refetch on every build.
+      -->
+      <extensions/>
+    </scm>
+    <scriptPath>@@SCRIPT_PATH@@</scriptPath>
+    <lightweight>false</lightweight>
+  </definition>
+  <triggers/>
+  <disabled>false</disabled>
+</flow-definition>
