@@ -1,45 +1,74 @@
-# Homelab IaC — nginx (MicroCloud) → WebLogic (k8s) → Oracle XE (Multipass)
+# Homelab IaC — Oracle XE + WebLogic (k8s) + nginx
 
-Infrastructure-as-code for a three-tier stack spread across three virtualization
-platforms on a single host, driven by Packer, Terraform, Ansible and Jenkins.
+Infrastructure-as-code for a three-tier Java application stack, provisioned with
+**Packer, Terraform, Ansible and Jenkins**. Every tier runs on Multipass VMs on a
+single host; WebLogic runs on a Multipass-based Kubernetes cluster.
 
 ```
                     LAN 192.168.29.0/24
                             │
-        ┌───────────────────┴────────────────────┐
-        │  192.168.29.200:80   nginx reverse proxy│   ← MicroCloud VM (LXD/OVN)
-        │  JSESSIONID route-ID session affinity   │     10.184.135.2
-        └───────────────────┬────────────────────┘
-                            │  192.168.29.201:8090  (ms1)
-                            │  192.168.29.202:8090  (ms2)
-                            │      ▲ socat, systemd-managed
-        ┌───────────────────┴────────────────────┐
-        │  WebLogic cluster, 2 managed servers    │   ← Multipass k8s
-        │  domain wlsdomain / ns wls-domain       │     10.2.243.0/24
-        └───────────────────┬────────────────────┘
-                            │  10.2.243.x:1521
-        ┌───────────────────┴────────────────────┐
-        │  Oracle XE 21c                          │   ← Multipass VM
-        └─────────────────────────────────────────┘
+                 192.168.29.200:80  (host socat bridge)
+                            │
+              ┌─────────────▼──────────────┐
+              │  nginx reverse proxy       │   Multipass VM
+              │  JSESSIONID route-ID       │   10.2.243.x
+              │  session affinity          │
+              └─────────────┬──────────────┘
+                            │  direct to NodePorts (same subnet)
+              ┌─────────────▼──────────────┐
+              │  WebLogic cluster          │   Multipass k8s
+              │  ms1 :30701  ms2 :30702    │   10.2.243.69
+              └─────────────┬──────────────┘
+                            │  jdbc:oracle:thin
+              ┌─────────────▼──────────────┐
+              │  Oracle XE 21c / XEPDB1    │   Multipass VM
+              │  :1521                     │   10.2.243.x
+              └────────────────────────────┘
 ```
 
-## Why the database lives on Multipass
-
-The previous Oracle instance ran in a libvirt VM on `192.168.122.0/24`, which WebLogic
-pods **could not reach** (`No route to host`) — that is what forced the domain into ADMIN
-mode and blocked deployment. A Multipass VM shares the `10.2.243.0/24` NAT network with
-the k8s nodes, so pods reach it directly. The platform choice is the fix.
+**Everything shares `10.2.243.0/24`**, so each tier reaches the next directly.
+Only the LAN entry point needs a bridge, because Multipass VMs are NAT'd.
 
 ## Layout
 
 | Path | Tool | Responsibility |
 |---|---|---|
-| `packer/wls-domain-image/` | Packer | Build `wls-domain-image` from the Oracle WLS base + WDT model |
-| `terraform/10-db-multipass/` | Terraform | Multipass VM for Oracle XE |
-| `terraform/20-wls-k8s/` | Terraform | Namespace, secrets, Domain/Cluster CRs, per-server NodePorts |
-| `terraform/30-nginx-multipass/` | Terraform | Multipass VM for nginx, on the k8s subnet |
-| `ansible/` | Ansible | Oracle XE bootstrap, app build+deploy, socat unit, nginx config |
+| `packer/wls-domain-image/` | Packer | WebLogic Model-in-Image domain image |
+| `terraform/10-db-multipass/` | Terraform | Oracle XE VM |
+| `terraform/20-wls-k8s/` | Terraform | Namespace, secrets, Domain/Cluster CRs, NodePorts |
+| `terraform/30-nginx-multipass/` | Terraform | nginx proxy VM |
+| `ansible/` | Ansible | XE bootstrap, app build+deploy, socat bridges, nginx config |
 | `jenkins/` | Jenkins | Pipelines: full infra, app-only redeploy, teardown |
+| `app/customer-onboarding/` | Maven | The application, with the fixes described below |
+
+## Why every tier is on Multipass
+
+nginx originally ran on MicroCloud (LXD + OVN + Ceph). It was moved after two
+failures in one evening:
+
+- **LXD and MicroCeph pools are loop-file backed and the loop devices are not
+  recreated at boot.** After a kernel upgrade LXD crash-looped on
+  `zpool import local: no such pool available`, 97 Ceph pgs went inactive, and
+  the proxy VM was unreachable until both images were manually re-attached.
+- **The OVN subnet could not reach the k8s subnet**, so the proxy had to hairpin
+  out to the physical LAN and back through host socat bridges just to reach a
+  NodePort.
+
+Multipass restores its own instances after a reboot and puts the proxy on the
+same subnet as the backends.
+
+## Application fixes carried in this repo
+
+`app/customer-onboarding/` is the upstream demo with four changes, each required
+to run on WebLogic:
+
+1. **Dialect-aware schema init** — the original issues an Oracle PL/SQL
+   anonymous block, which H2 cannot parse.
+2. **Explicit JDBC driver registration** — WebLogic's classloader isolation stops
+   `DriverManager` SPI discovery from seeing `WEB-INF/lib`.
+3. **H2 dependency** alongside `ojdbc11`, so `DB_MODE=h2` works with no database.
+4. **`web.xml` is templated** by Ansible, so the JDBC URL follows `DB_MODE`
+   instead of being hardcoded.
 
 ## Adopting existing hand-built infrastructure
 
