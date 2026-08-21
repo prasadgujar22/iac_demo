@@ -43,10 +43,10 @@ Only the LAN entry point needs a bridge, because Multipass VMs are NAT'd.
 
 ## Why every tier is on Multipass
 
-nginx originally ran on MicroCloud (LXD + OVN + Ceph). It was moved after two
-failures in one evening:
+nginx originally ran on MicroCloud (LXD + OVN + Ceph). **MicroCloud has since been
+removed from the host entirely**, after two failures in one evening:
 
-- **LXD and MicroCeph pools are loop-file backed and the loop devices are not
+- **LXD and MicroCeph pools were loop-file backed and the loop devices were not
   recreated at boot.** After a kernel upgrade LXD crash-looped on
   `zpool import local: no such pool available`, 97 Ceph pgs went inactive, and
   the proxy VM was unreachable until both images were manually re-attached.
@@ -54,8 +54,9 @@ failures in one evening:
   out to the physical LAN and back through host socat bridges just to reach a
   NodePort.
 
-Multipass restores its own instances after a reboot and puts the proxy on the
-same subnet as the backends.
+Multipass restores its own instances after a reboot and puts every tier on one
+subnet. Removing the four snaps (lxd, microceph, microovn, microcloud) reclaimed
+**21 GB** and removed a whole class of boot-time failure.
 
 ## Application fixes carried in this repo
 
