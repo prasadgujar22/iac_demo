@@ -1,170 +1,130 @@
 ---
-# Install and configure Oracle XE 21c on the Multipass DB VM.
+# Oracle XE 21c as a container on the database VM.
 #
-# Platform note: this VM is on Multipass (10.2.243.0/24) specifically so that
-# WebLogic pods can reach the listener. The previous libvirt VM on
-# 192.168.122.0/24 was unreachable from pods ("No route to host"), which forced
-# the domain into ADMIN mode and blocked all deployment.
+# WHY A CONTAINER, NOT A NATIVE INSTALL
+# Oracle ships XE as an RPM only. Converting it for Ubuntu with `alien` failed
+# four times across three distinct root causes:
+#   1. alien exits non-zero on SUCCESS (rpm NOKEY signature warnings propagate)
+#   2. Ubuntu 24.04 ships libaio.so.1t64; Oracle links the historic libaio.so.1
+#   3. netca rejects Ubuntu's 127.0.1.1 hostname mapping
+# and then DBCA still failed with DBT-05509 inside its CVU prerequisite
+# machinery. Each retry cost ~40 minutes (2.2GB download + ~35min conversion).
+#
+# gvenzl/oracle-xe is the image Oracle's own developer advocate maintains for
+# exactly this purpose. It starts in minutes, needs no conversion, and creates
+# the application user itself.
+#
+# The JDBC contract is IDENTICAL, so nothing downstream changes:
+#   jdbc:oracle:thin:@//<vm-ip>:1521/XEPDB1
 
-- name: Wait for cloud-init prerequisites to complete
-  ansible.builtin.wait_for:
-    path: /var/lib/cloud/oracle-prereqs-done
-    timeout: 600
+- name: Install Docker on the database VM
+  ansible.builtin.apt:
+    name:
+      - docker.io
+      - python3-docker
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
   become: true
-
-- name: Check whether Oracle XE is already installed
-  ansible.builtin.stat:
-    path: /etc/init.d/oracle-xe-21c
-  register: xe_installed
-  become: true
-
-- name: Assert swap exists
-  # The XE installer aborts without swap, and Multipass images ship with none.
-  ansible.builtin.assert:
-    that:
-      - ansible_facts['swaptotal_mb'] | int > 0
-    fail_msg: "Oracle XE requires swap; cloud-init should have created /swapfile."
-
-- name: Download the Oracle XE RPM
-  ansible.builtin.get_url:
-    url: "{{ oracle_xe_rpm_url }}"
-    dest: "/tmp/{{ oracle_xe_rpm_url | basename }}"
-    mode: "0644"
-    timeout: 120
-  become: true
-  when: not xe_installed.stat.exists
-  register: xe_download
+  register: docker_install
   retries: 3
   delay: 10
-  until: xe_download is succeeded
+  until: docker_install is succeeded
 
-- name: Report free space before conversion
-  # alien needs ~27G peak (RPM 2.2G + extracted 12G + .deb 2.2G + installed 11G).
-  # Fail with a clear message rather than dying mid-dpkg with "no space left".
-  ansible.builtin.shell:
-    cmd: df -BG --output=avail / | tail -1 | tr -dc '0-9'
-  register: xe_space
-  changed_when: false
-  when: not xe_installed.stat.exists
-
-- name: Require enough disk for the alien conversion
-  ansible.builtin.assert:
-    that:
-      - xe_space.stdout | int >= 26
-    fail_msg: >-
-      Only {{ xe_space.stdout }}G free; the alien conversion needs ~27G peak
-      (RPM 2.2G + extracted 12G + .deb 2.2G + installed 11G). Increase the
-      `disk` variable in terraform/10-db-multipass and recreate the VM.
-    success_msg: "{{ xe_space.stdout }}G free — sufficient for the conversion"
-  when: not xe_installed.stat.exists
-
-- name: Convert and install the RPM via alien
-  # Oracle ships RPM only; alien converts it for Debian/Ubuntu.
-  ansible.builtin.shell:
-    cmd: |
-      set -euo pipefail
-      cd /tmp
-      alien --install --scripts "{{ oracle_xe_rpm_url | basename }}"
-    creates: /etc/init.d/oracle-xe-21c
-  become: true
-  when: not xe_installed.stat.exists
-  async: 2400
-  poll: 30
-
-- name: Reclaim conversion intermediates
-  # The RPM, the extracted tree and the generated .deb total ~16G and are of no
-  # use once installed. Removing them frees space for datafile growth.
-  ansible.builtin.shell:
-    cmd: |
-      set -euo pipefail
-      rm -rf /tmp/oracle-database-xe-21c-1.0 \
-             /tmp/oracle-database-xe-21c-*.rpm \
-             /tmp/oracle-database-xe-21c_*.deb
-      df -BG --output=avail / | tail -1 | tr -dc '0-9'
-  become: true
-  register: xe_reclaimed
-  changed_when: true
-
-- name: Report reclaimed space
-  ansible.builtin.debug:
-    msg: "{{ xe_reclaimed.stdout }}G free after removing conversion intermediates"
-
-- name: Configure the database (creates XEPDB1)
-  ansible.builtin.shell:
-    cmd: /etc/init.d/oracle-xe-21c configure
-    creates: "{{ oracle_home }}/dbs/spfileXE.ora"
-  become: true
-  environment:
-    ORACLE_DOCKER_INSTALL: "false"
-    ORACLE_PASSWORD: "{{ oracle_sys_password }}"
-  async: 3600
-  poll: 30
-  no_log: true          # never leak the SYS password into logs
-
-- name: Bind the listener to all interfaces
-  # The generated listener.ora binds to the hostname, which resolves only
-  # locally, so remote clients get ORA-12541 "no listener". 0.0.0.0 also fails on
-  # some builds; the VM's actual address is the reliable choice.
-  ansible.builtin.template:
-    src: listener.ora.j2
-    dest: "{{ oracle_home }}/network/admin/listener.ora"
-    owner: oracle
-    group: oinstall
-    mode: "0640"
-    backup: true
-  become: true
-  notify: restart oracle listener
-
-- name: Ensure Oracle XE is enabled and running
-  ansible.builtin.service:
-    name: oracle-xe-21c
+- name: Ensure Docker is running
+  ansible.builtin.systemd:
+    name: docker
+    state: started
     enabled: true
-    state: started
   become: true
 
-- name: Flush handlers so the listener is rebound before we probe it
-  ansible.builtin.meta: flush_handlers
-
-- name: Wait for the listener to accept TCP connections
-  ansible.builtin.wait_for:
-    host: "{{ ansible_host | default(ansible_default_ipv4.address) }}"
-    port: "{{ oracle_listener_port }}"
-    timeout: 300
-    state: started
-
-- name: Create the application schema
-  # Idempotent: the script tolerates an existing user and existing table.
-  ansible.builtin.template:
-    src: create-app-schema.sql.j2
-    dest: /tmp/create-app-schema.sql
-    owner: oracle
-    group: oinstall
-    mode: "0600"
-  become: true
-  no_log: true
-
-- name: Apply the application schema
-  ansible.builtin.shell:
-    cmd: |
-      set -euo pipefail
-      export ORACLE_HOME="{{ oracle_home }}"
-      export ORACLE_SID=XE
-      export PATH="$ORACLE_HOME/bin:$PATH"
-      sqlplus -S -L "sys/{{ oracle_sys_password }}@localhost:{{ oracle_listener_port }}/{{ oracle_pdb }} as sysdba" \
-        @/tmp/create-app-schema.sql
-  become: true
-  become_user: oracle
-  register: schema_apply
-  changed_when: "'created' in schema_apply.stdout"
-  no_log: true
-
-- name: Remove the schema script (contains credentials)
+- name: Create the datafile directory
+  # Bind-mounted so the database survives container replacement. uid 54321 is
+  # the `oracle` user inside the image; without this ownership the container
+  # cannot write its datafiles and exits during initialisation.
   ansible.builtin.file:
-    path: /tmp/create-app-schema.sql
-    state: absent
+    path: "{{ oracle_data_dir }}"
+    state: directory
+    owner: "54321"
+    group: "54321"
+    mode: "0755"
   become: true
 
-- name: Report the JDBC URL for downstream consumers
-  ansible.builtin.set_fact:
-    oracle_jdbc_url: >-
-      jdbc:oracle:thin:@//{{ ansible_host | default(ansible_default_ipv4.address) }}:{{ oracle_listener_port }}/{{ oracle_pdb }}
+- name: Pull the Oracle XE image
+  community.docker.docker_image:
+    name: "{{ oracle_xe_image }}"
+    source: pull
+    state: present
+  become: true
+  register: xe_pull
+  retries: 2
+  delay: 15
+  until: xe_pull is succeeded
+
+- name: Run the Oracle XE container
+  # APP_USER/APP_USER_PASSWORD make the image create the application schema in
+  # XEPDB1 on first boot, which replaces the hand-written SQL the native install
+  # needed. Published on 0.0.0.0 so WebLogic pods on 10.2.243.0/24 can reach it.
+  community.docker.docker_container:
+    name: "{{ oracle_container_name }}"
+    image: "{{ oracle_xe_image }}"
+    state: started
+    restart_policy: unless-stopped
+    published_ports:
+      - "0.0.0.0:{{ oracle_listener_port }}:1521"
+    env:
+      ORACLE_PASSWORD: "{{ oracle_sys_password }}"
+      APP_USER: "{{ oracle_app_user }}"
+      APP_USER_PASSWORD: "{{ oracle_app_password }}"
+    volumes:
+      - "{{ oracle_data_dir }}:/opt/oracle/oradata"
+    healthcheck:
+      test: ["CMD", "healthcheck.sh"]
+      interval: 30s
+      timeout: 10s
+      retries: 20
+  become: true
+  no_log: true          # never leak the SYS or app password
+
+- name: Wait for the database to finish initialising
+  # First boot creates the datafiles and can take several minutes; subsequent
+  # starts are quick because the bind mount persists them. The image prints this
+  # banner only when the listener is up AND the PDB is open for business.
+  ansible.builtin.shell:
+    cmd: docker logs {{ oracle_container_name }} 2>&1 | grep -c 'DATABASE IS READY TO USE'
+  become: true
+  register: xe_ready
+  changed_when: false
+  retries: 60
+  delay: 15
+  until: xe_ready.stdout | int > 0
+
+- name: Verify the listener accepts TCP connections
+  ansible.builtin.wait_for:
+    host: "{{ ansible_default_ipv4.address }}"
+    port: "{{ oracle_listener_port }}"
+    timeout: 60
+  become: true
+
+- name: Confirm the application user can actually log in
+  # Proves the credential works end to end rather than trusting that the
+  # container created it. Uses the PDB service the application will use.
+  ansible.builtin.shell:
+    cmd: >-
+      docker exec {{ oracle_container_name }}
+      bash -lc "echo 'select 1 from dual;' |
+      sqlplus -s {{ oracle_app_user }}/\"{{ oracle_app_password }}\"@//localhost:1521/{{ oracle_pdb }}"
+  become: true
+  register: xe_login
+  changed_when: false
+  failed_when: >-
+    xe_login.rc != 0 or
+    'ORA-' in xe_login.stdout or
+    '1' not in xe_login.stdout
+  no_log: true
+
+- name: Report the database endpoint
+  ansible.builtin.debug:
+    msg: >-
+      Oracle XE ready — jdbc:oracle:thin:@//{{ ansible_default_ipv4.address }}:{{ oracle_listener_port }}/{{ oracle_pdb }}
+      (app user {{ oracle_app_user }})

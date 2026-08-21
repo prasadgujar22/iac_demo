@@ -27,7 +27,13 @@ fi
 
 # Oracle requires: >= 8 chars, at least one letter, digit and permitted symbol.
 # Avoid / + = @ " ' which break sqlplus connect strings and shell quoting.
-gen() { openssl rand -base64 24 | tr -dc 'A-Za-z0-9' | head -c 18; }
+#
+# CRITICAL: the password must NOT start with a digit. Oracle rejects such values
+# with DBT-05509 / INVALID_USER_INPUT during dbca, because an unquoted
+# identifier beginning with a number is invalid. `openssl rand | tr -dc` happily
+# produces one about 15% of the time, which makes the failure intermittent and
+# baffling. Force a leading letter.
+gen() { printf 'A%s' "$(openssl rand -base64 24 | tr -dc 'A-Za-z0-9' | head -c 17)"; }
 
 SYS_PW="$(gen)aA1"
 APP_PW="$(gen)aA1"

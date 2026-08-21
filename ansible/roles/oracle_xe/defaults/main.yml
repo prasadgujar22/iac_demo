@@ -1,13 +1,18 @@
 ---
-oracle_home: /opt/oracle/product/21c/dbhomeXE
+# Contract with the rest of the stack. These values determine the JDBC URL that
+# the application's web.xml is rendered with, so they must not drift.
 oracle_pdb: XEPDB1
 oracle_listener_port: 1521
 oracle_app_user: customer_app
 
-# Oracle XE 21c RPM. Requires accepting Oracle's licence terms.
-oracle_xe_rpm_url: >-
-  https://download.oracle.com/otn-pub/otn_software/db-express/oracle-database-xe-21c-1.0-1.ol8.x86_64.rpm
+# Container runtime settings.
+#
+# 21-slim rather than the full image: ~2GB instead of ~9GB, and it carries the
+# same XEPDB1 pluggable database. gvenzl also publishes oracle-free:23-slim if a
+# newer engine is ever wanted — the JDBC URL shape is unchanged.
+oracle_xe_image: gvenzl/oracle-xe:21-slim
+oracle_container_name: oracle-xe
 
-# Passwords MUST be supplied at run time (Jenkins credentials / vault / -e).
-# Deliberately undefined so a missing value fails loudly rather than defaulting
-# to something guessable.
+# Bind-mounted datafiles, so the database survives container recreation.
+# Must be owned by uid 54321 (the `oracle` user inside the image).
+oracle_data_dir: /opt/oracle-data
