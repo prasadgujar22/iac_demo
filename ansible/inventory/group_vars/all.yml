@@ -8,7 +8,10 @@ app_name:         customer-onboarding
 app_context_root: /customer-onboarding
 app_repo:         https://github.com/prasadgujar22/java_session_management_demo.git
 app_repo_version: main
-app_build_dir:    /tmp/homelab-iac-build
+# Per-user build directory. A shared /tmp path is owned by whoever ran first,
+# so the next user (developer vs the jenkins CI account) hits
+#   Destination /tmp/homelab-iac-build/src not writable
+app_build_dir:    "/tmp/homelab-iac-build-{{ lookup('env', 'USER') | default('anon', true) }}"
 app_war_name:     "{{ app_name }}.war"
 
 app_login_username: admin
