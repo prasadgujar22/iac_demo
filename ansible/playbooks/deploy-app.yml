@@ -32,10 +32,15 @@
       #
       # The shared state backend is authoritative and visible to every job, so
       # query it whenever the inventory file is missing.
-      ansible.builtin.command:
+      ansible.builtin.shell:
         cmd: >-
           terraform -chdir={{ repo_root }}/terraform/10-db-multipass
-          output -raw db_host
+          init -reconfigure -no-color -input=false >/dev/null 2>&1;
+          terraform -chdir={{ repo_root }}/terraform/10-db-multipass
+          output -raw db_host 2>/dev/null
+        # `init` first: the app-redeploy workspace has never initialised this
+        # stack, so `output` alone fails with "Backend initialization required".
+        # -reconfigure because the shared backend is authoritative.
       register: db_host_tf
       changed_when: false
       failed_when: false
