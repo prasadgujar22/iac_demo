@@ -81,11 +81,16 @@ resource "null_resource" "proxy_vm" {
     interpreter = ["/bin/bash", "-c"]
     command     = <<-EOT
       set -euo pipefail
-      if multipass info ${var.vm_name} >/dev/null 2>&1; then
+      # multipass requires client authentication (local.passphrase is set).
+      # CI runs as a user that is not authenticated, while root bypasses the
+      # check — so fall back to sudo. Without this, destroy provisioners fail
+      # silently and leave VMs running with no state to track them.
+      mp() { if multipass "$@" 2>/dev/null; then return 0; else sudo -n multipass "$@"; fi; }
+      if mp info ${var.vm_name} >/dev/null 2>&1; then
         echo "[proxy] ${var.vm_name} already exists, skipping launch"
       else
         echo "[proxy] launching ${var.vm_name}"
-        multipass launch ${var.image} \
+        mp launch ${var.image} \
           --name ${var.vm_name} \
           --cpus ${var.cpus} \
           --memory ${var.memory} \
@@ -93,7 +98,7 @@ resource "null_resource" "proxy_vm" {
           --cloud-init ${local_file.cloud_init.filename} \
           --timeout ${var.launch_timeout}
       fi
-      multipass info ${var.vm_name} --format csv | tail -1 | awk -F, '{print "[proxy] " $1 " " $2 " at " $3}'
+      mp info ${var.vm_name} --format csv | tail -1 | awk -F, '{print "[proxy] " $1 " " $2 " at " $3}'
     EOT
   }
 
@@ -102,8 +107,14 @@ resource "null_resource" "proxy_vm" {
     interpreter = ["/bin/bash", "-c"]
     command     = <<-EOT
       set -uo pipefail
+      mp() { if multipass "$@" 2>/dev/null; then return 0; else sudo -n multipass "$@"; fi; }
+      # multipass requires client authentication (local.passphrase is set).
+      # CI runs as a user that is not authenticated, while root bypasses the
+      # check — so fall back to sudo. Without this, destroy provisioners fail
+      # silently and leave VMs running with no state to track them.
+      mp() { if multipass "$@" 2>/dev/null; then return 0; else sudo -n multipass "$@"; fi; }
       echo "[proxy] deleting ${self.triggers.vm_name}"
-      multipass delete ${self.triggers.vm_name} --purge || true
+      mp delete ${self.triggers.vm_name} --purge || true
     EOT
   }
 

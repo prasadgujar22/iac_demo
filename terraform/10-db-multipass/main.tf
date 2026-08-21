@@ -81,11 +81,16 @@ resource "null_resource" "db_vm" {
     interpreter = ["/bin/bash", "-c"]
     command     = <<-EOT
       set -euo pipefail
-      if multipass info "${var.vm_name}" >/dev/null 2>&1; then
+      # multipass requires client authentication (local.passphrase is set).
+      # CI runs as a user that is not authenticated, while root bypasses the
+      # check — so fall back to sudo. Without this, destroy provisioners fail
+      # silently and leave VMs running with no state to track them.
+      mp() { if multipass "$@" 2>/dev/null; then return 0; else sudo -n multipass "$@"; fi; }
+      if mp info "${var.vm_name}" >/dev/null 2>&1; then
         echo "[db] ${var.vm_name} already exists — skipping launch"
       else
         echo "[db] launching ${var.vm_name}"
-        multipass launch "${var.image}" \
+        mp launch "${var.image}" \
           --name "${var.vm_name}" \
           --cpus "${var.cpus}" \
           --memory "${var.memory}" \
@@ -96,8 +101,8 @@ resource "null_resource" "db_vm" {
 
       # A VM reports an IP before its SSH/agent stack is ready; wait for both.
       for i in $(seq 1 60); do
-        STATE=$(multipass info "${var.vm_name}" --format csv 2>/dev/null | awk -F, 'NR>1{print $2}')
-        IP=$(multipass info "${var.vm_name}" --format csv 2>/dev/null | awk -F, 'NR>1{print $3}')
+        STATE=$(mp info "${var.vm_name}" --format csv 2>/dev/null | awk -F, 'NR>1{print $2}')
+        IP=$(mp info "${var.vm_name}" --format csv 2>/dev/null | awk -F, 'NR>1{print $3}')
         if [ "$STATE" = "Running" ] && [ -n "$IP" ]; then
           echo "[db] ${var.vm_name} Running at $IP"
           exit 0
@@ -116,9 +121,15 @@ resource "null_resource" "db_vm" {
     interpreter = ["/bin/bash", "-c"]
     command     = <<-EOT
       set -uo pipefail
+      mp() { if multipass "$@" 2>/dev/null; then return 0; else sudo -n multipass "$@"; fi; }
+      # multipass requires client authentication (local.passphrase is set).
+      # CI runs as a user that is not authenticated, while root bypasses the
+      # check — so fall back to sudo. Without this, destroy provisioners fail
+      # silently and leave VMs running with no state to track them.
+      mp() { if multipass "$@" 2>/dev/null; then return 0; else sudo -n multipass "$@"; fi; }
       NAME="${self.triggers.vm_name}"
       echo "[db] deleting $NAME"
-      multipass delete "$NAME" 2>/dev/null || true
+      mp delete "$NAME" 2>/dev/null || true
       multipass purge 2>/dev/null || true
     EOT
   }
