@@ -6,7 +6,9 @@ This repository contains a Maven-based Java web application packaged as a `.war`
 
 - Login page with session-based authentication
 - Customer onboarding tab with a submission form
-- Reports tab listing onboarded customers
+- Reports tab listing onboarded customers, with an **Edit** link per row that
+  reopens the onboarding form pre-filled for that record (same form handles
+  both create and update; `CREATED_DATE` is preserved on edit)
 - Oracle Database Express Edition integration using Oracle JDBC
 - WebLogic deployment descriptors included
 

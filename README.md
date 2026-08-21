@@ -108,10 +108,12 @@ Multipass restores its own instances after a reboot and puts every tier on one
 subnet. Removing the four snaps (lxd, microceph, microovn, microcloud) reclaimed
 **21 GB** and removed a whole class of boot-time failure.
 
-## Application fixes carried in this repo
+## Application fixes and features carried in this repo
 
-`app/customer-onboarding/` is the upstream demo with four changes, each required
-to run on WebLogic:
+`app/customer-onboarding/` is the upstream demo with these changes on top,
+vendored directly in this repo (`app/customer-onboarding/`) rather than forked
+elsewhere, so the application and the infrastructure that deploys it are
+reviewed and versioned together:
 
 1. **Dialect-aware schema init** — the original issues an Oracle PL/SQL
    anonymous block, which H2 cannot parse.
@@ -120,6 +122,18 @@ to run on WebLogic:
 3. **H2 dependency** alongside `ojdbc11`, so `DB_MODE=h2` works with no database.
 4. **`web.xml` is templated** by Ansible, so the JDBC URL follows `DB_MODE`
    instead of being hardcoded.
+5. **Edit existing records.** The Reports tab carries an **Edit** link per row
+   (`/dashboard?tab=onboarding&editId=N`) that reopens the onboarding form
+   pre-filled for that record; the same form and servlet (`/customers`) handle
+   both create and update, distinguished by a hidden `id` field.
+   `CustomerDao.update()`/`findById()` back it; `CREATED_DATE` is left
+   untouched on edit. Values re-rendered into the form are HTML-escaped, since
+   existing data may legitimately contain `&`/`"`/`<`/`>`.
+
+The application is built and deployed by the `homelab-app` Jenkins pipeline
+(see below) — not by uploading a WAR through the WebLogic console by hand, as
+the vendored `app/customer-onboarding/README.md` describes for a standalone
+checkout.
 
 ## Adopting existing hand-built infrastructure
 
