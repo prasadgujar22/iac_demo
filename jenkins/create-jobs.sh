@@ -61,6 +61,7 @@ JOBS=(
   "homelab-app|jenkins/Jenkinsfile.app|Application redeploy only: rebuild the WAR, redeploy to ms1+ms2, refresh routing, verify"
   "homelab-teardown|jenkins/Jenkinsfile.teardown|DESTRUCTIVE teardown: destroys every tier in reverse order. Requires CONFIRM=DESTROY plus an approval"
   "homelab-shutdown|jenkins/Jenkinsfile.shutdown|Non-destructive: stops every VM (multipass stop). State and data are untouched; multipass start brings the stack back"
+  "homelab-start|jenkins/Jenkinsfile.start|Non-destructive: starts every VM (multipass start). Counterpart to homelab-shutdown; database and k8s nodes first, nginx last"
 )
 
 existing="$(cli list-jobs 2>/dev/null || true)"

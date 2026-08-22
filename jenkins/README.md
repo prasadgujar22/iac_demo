@@ -6,6 +6,7 @@
 | Application redeploy | `Jenkinsfile.app` | Rebuild the WAR, redeploy, refresh routing, verify. The fast inner loop. |
 | Teardown | `Jenkinsfile.teardown` | Destroy in reverse order. Requires typing `DESTROY`. |
 | Shutdown | `Jenkinsfile.shutdown` | Non-destructive: `multipass stop` every VM. State and data untouched; `multipass start <name>` brings the stack back. |
+| Start | `Jenkinsfile.start` | Non-destructive: `multipass start` every VM. Counterpart to Shutdown; database and k8s nodes first, nginx last. |
 
 ## Why Jenkins runs on the host, not in Docker
 
