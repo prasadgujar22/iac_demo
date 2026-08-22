@@ -184,6 +184,20 @@ set -uo pipefail
             }
         }
 
+        stage('Destroy K8s tier') {
+            when { expression { params.ACTION == 'DESTROY' } }
+            steps {
+                sh '''#!/bin/bash
+                    set -euo pipefail
+                    # `init` before `destroy`: a fresh CI workspace has no provider
+                    # plugins, and destroy fails with "Inconsistent dependency lock
+                    # file ... no version is selected" before touching anything.
+                    terraform -chdir=terraform/05-k8s-multipass init -reconfigure -no-color -input=false
+                    terraform -chdir=terraform/05-k8s-multipass destroy -auto-approve -no-color
+                '''
+            }
+        }
+
         stage('Destroy database tier') {
             when {
                 allOf {
