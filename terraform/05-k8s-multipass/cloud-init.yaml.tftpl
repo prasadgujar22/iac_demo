@@ -22,6 +22,45 @@ write_files:
       net.ipv4.ip_forward                 = 1
 
 runcmd:
+  # Freeze the DHCP-assigned address as static so it survives VM restarts.
+  #
+  # Cloud-init's own netplan file (50-cloud-init.yaml) matches the NIC by
+  # PermanentMACAddress under a stanza named "default"; systemd-networkd
+  # applies only the first matching .network file per link in filename
+  # order, and "10-netplan-default.network" sorts before an override keyed
+  # "enp0s1", so a plain static override is silently ignored and the
+  # interface stays on DHCP. Key our override "00-enp0s1" instead so its
+  # generated unit ("10-netplan-00-enp0s1.network") sorts first and
+  # actually wins. (Root-caused on the nginx-proxy stack after the earlier
+  # manual 99-static.yaml pin on this VM turned out to have never taken
+  # effect — same bug.)
+  - |
+    set -e
+    IFACE=enp0s1
+    for i in $(seq 1 30); do
+      IP=$(ip -4 -o addr show "$IFACE" | awk '{print $4}' | cut -d/ -f1)
+      [ -n "$IP" ] && break
+      sleep 1
+    done
+    GW=$(ip route show default dev "$IFACE" | awk '{print $3}')
+    cat > /etc/netplan/00-static.yaml <<NETPLAN
+    network:
+      version: 2
+      ethernets:
+        00-$IFACE:
+          match:
+            name: $IFACE
+          dhcp4: false
+          addresses: [$IP/24]
+          routes:
+            - to: default
+              via: $GW
+          nameservers:
+            addresses: [$GW, 1.1.1.1]
+    NETPLAN
+    chmod 600 /etc/netplan/00-static.yaml
+    netplan apply
+
   # kubeadm refuses to init/join with swap enabled.
   - swapoff -a
   - sed -ri '/\sswap\s/s/^#?/#/' /etc/fstab
