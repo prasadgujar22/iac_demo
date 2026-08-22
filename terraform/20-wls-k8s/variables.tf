@@ -64,9 +64,17 @@ variable "drop_datasources" {
     Any datasource baked into the model is initialised at pod start; if its
     database is unreachable the managed servers drop into ADMIN mode and all
     application deployment is blocked. Let the application own its JDBC config.
+
+    Defaults to empty: packer/wls-domain-image/model/wls-domain-model.yaml
+    deliberately ships with NO JDBCSystemResource at all (see its header
+    comment), so a delete directive here has nothing to delete. WDT's
+    updateDomain.sh then logs "Unable to delete JDBCSystemResource <name>,
+    name does not exist" as a WARNING but still exits 1, which the operator's
+    modelInImage.sh treats as a hard introspection failure. Only set this if a
+    *different* domain image actually bakes in a named datasource.
   EOT
   type        = list(string)
-  default     = ["OracleDS"]
+  default     = []
 }
 
 variable "managed_servers" {

@@ -12,8 +12,23 @@
 # degrades one feature rather than the entire domain.
 #
 domainInfo:
-    AdminUserName: '@@PROP:admin.username@@'
-    AdminPassword: '@@PROP:admin.password@@'
+    # The operator's introspector auto-populates the special __weblogic-credentials__
+    # secret macros from spec.webLogicCredentialsSecret at EVERY introspection, so the
+    # domain's real admin user always matches whatever the K8s secret currently holds.
+    #
+    # A custom @@PROP:admin.username@@/@@PROP:admin.password@@ pair looks equivalent
+    # but is NOT: nothing in this pipeline actually populates those two specific
+    # property names in the operator-generated variable file. WDT still resolved them
+    # in this case — but from wls-domain.properties, which sits alongside the model in
+    # the image (WDT auto-loads any .properties file it finds under WDT_MODEL_HOME) —
+    # and that file's admin.password is a literal, never-substituted
+    # "CHANGE_ME_AT_BUILD_TIME" placeholder. The domain's real admin user silently gets
+    # created with that literal string as its password, while boot.properties is
+    # generated per-pod-start from the ACTUAL K8s secret — a permanent mismatch that
+    # surfaces as "BEA-090402 Authentication denied: Boot identity not valid" on every
+    # AdminServer boot, regardless of how many times the secret is regenerated.
+    AdminUserName: '@@SECRET:__weblogic-credentials__:username@@'
+    AdminPassword: '@@SECRET:__weblogic-credentials__:password@@'
     ServerStartMode: 'prod'
 
 topology:
@@ -24,6 +39,15 @@ topology:
     Server:
         'AdminServer':
             ListenPort: 7001
+            # Empty string, not unset: WLS resolves an unset ListenAddress to
+            # the container's hostname, which the AdministrationPort channel
+            # then binds ONLY as 127.0.0.1 — unreachable from the kubelet's
+            # network namespace, so the readiness probe gets "connection
+            # refused" against the pod IP forever even though the server is
+            # genuinely RUNNING. An explicit empty ListenAddress is WLS's
+            # wildcard (bind all interfaces), which is what every channel
+            # (including the administration channel) needs in a container.
+            ListenAddress: ''
             ServerStart:
                 Arguments: '-Xms1024m -Xmx1536m'
 
@@ -32,24 +56,29 @@ topology:
             ClientCertProxyEnabled: false
             # Unicast messaging: multicast is unreliable across CNI overlays.
             ClusterMessagingMode: 'unicast'
+            # WDT models a dynamic cluster as DynamicServers NESTED under its
+            # owning Cluster, not as a separate top-level "DynamicCluster:"
+            # folder. The latter fails model validation ("DynamicCluster is
+            # not one of the folder names allowed in model location
+            # topology:/") and, separately, breaks the operator's own
+            # model_wdt_mii_filter.py, which looks for ServerNamePrefix here.
+            DynamicServers:
+                ServerTemplate: 'wls-template'
+                ServerNamePrefix: 'ms'
+                DynamicClusterSize: '@@PROP:cluster.size@@'
+                CalculatedListenPorts: false
 
     ServerTemplate:
         'wls-template':
             ListenPort: 7003
+            ListenAddress: ''
             Cluster: '@@PROP:cluster.name@@'
             ServerStart:
                 Arguments: '-Xms1024m -Xmx1536m'
 
-    DynamicCluster:
-        '@@PROP:cluster.name@@':
-            ServerTemplate: 'wls-template'
-            DynamicClusterSize: '@@PROP:cluster.size@@'
-            CalculatedListenPorts: false
-            ServerNamePrefix: 'ms'
-
     SecurityConfiguration:
-        NodeManagerUsername: '@@PROP:admin.username@@'
-        NodeManagerPasswordEncrypted: '@@PROP:admin.password@@'
+        NodeManagerUsername: '@@SECRET:__weblogic-credentials__:username@@'
+        NodeManagerPasswordEncrypted: '@@SECRET:__weblogic-credentials__:password@@'
 
 appDeployments:
     # The application WAR is deployed by Ansible/Jenkins after the domain is

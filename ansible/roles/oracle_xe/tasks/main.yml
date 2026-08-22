@@ -76,6 +76,9 @@
       ORACLE_PASSWORD: "{{ oracle_sys_password }}"
       APP_USER: "{{ oracle_app_user }}"
       APP_USER_PASSWORD: "{{ oracle_app_password }}"
+      # oracle-free names its PDB from ORACLE_DATABASE (default FREEPDB1 if
+      # unset); pin it to oracle_pdb so the JDBC URL contract is unchanged.
+      ORACLE_DATABASE: "{{ oracle_pdb }}"
     volumes:
       - "{{ oracle_data_dir }}:/opt/oracle/oradata"
     healthcheck:

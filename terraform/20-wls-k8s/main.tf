@@ -184,8 +184,32 @@ resource "kubernetes_manifest" "domain" {
       replicas                 = var.replicas
 
       adminServer = {
-        adminChannelPortForwardingEnabled = true
+        # When true, the operator's readiness/liveness probes hard-require a
+        # dedicated SSL "administration channel" on port 9002. WebLogic
+        # 14.1.2 keeps binding that channel to 127.0.0.1 only regardless of
+        # ListenAddress settings in the WDT model, so the probe gets
+        # "connection refused" against the pod IP forever even though the
+        # server is genuinely RUNNING. Disabling this makes the operator
+        # probe the regular admin port instead, which correctly binds to the
+        # pod IP. The only capability lost is kubectl port-forward-style
+        # direct access to the admin channel — irrelevant here since the
+        # admin console is already reachable via its NodePort.
+        adminChannelPortForwardingEnabled = false
         serverStartPolicy                 = "IfNeeded"
+        # Without an explicit request, the scheduler has no idea AdminServer's
+        # JVM (-Xmx1536m) needs real memory, and happily stacks it onto the
+        # same node as a managed server — which is exactly how the 3GB worker
+        # ended up hosting AdminServer *and* ms2 simultaneously, thrashed
+        # under memory pressure, and got its kubelet OOM-killed mid-deploy
+        # (kubectl exec into the pod died with exit 137). Requesting/limiting
+        # comparably to a managed server lets the scheduler bin-pack correctly
+        # across the master (4G) and worker (3G) nodes.
+        serverPod = {
+          resources = {
+            requests = { cpu = var.ms_cpu_request, memory = "1024Mi" }
+            limits   = { cpu = var.ms_cpu_limit, memory = "1792Mi" }
+          }
+        }
         adminService = {
           channels = [{ channelName = "default", nodePort = var.admin_nodeport }]
         }

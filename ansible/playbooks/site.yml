@@ -74,6 +74,51 @@
         success_msg: "database host resolved: {{ oracle_db_host }}"
       when: db_mode == 'oracle'
 
+    # This host has no physical LAN (the upstream repo's 192.168.29.x /
+    # 10.2.243.x addresses belong to the original Linux homelab box). The k8s
+    # cluster and nginx proxy are reached directly at their Multipass IPs
+    # instead, resolved here the same way oracle_db_host is above.
+    - name: Read the k8s master IP from the k8s stack's shared Terraform state
+      ansible.builtin.shell:
+        cmd: >-
+          terraform -chdir={{ repo_root }}/terraform/05-k8s-multipass
+          init -reconfigure -no-color -input=false >/dev/null 2>&1;
+          terraform -chdir={{ repo_root }}/terraform/05-k8s-multipass
+          output -raw master_ip 2>/dev/null
+      register: k8s_master_ip_tf
+      changed_when: false
+      failed_when: false
+
+    - name: Resolve the k8s master IP for this environment
+      ansible.builtin.set_fact:
+        resolved_k8s_master_ip: "{{ (k8s_master_ip_tf.stdout | default('')) | trim }}"
+
+    - name: Resolve the nginx proxy's Multipass IP for this environment
+      # Mirrors the lan_bridge role's own lookup: prefer the Terraform-generated
+      # proxy_internal_ip, fall back to the inventory's ansible_host.
+      ansible.builtin.set_fact:
+        resolved_proxy_ip: >-
+          {{ hostvars[groups['nginx'][0]]['proxy_internal_ip']
+             | default(hostvars[groups['nginx'][0]]['ansible_host'])
+             | default('') }}
+      when: groups['nginx'] | default([]) | length > 0
+
+- name: Resolve environment networking overrides (no physical LAN on this host)
+  hosts: control:nginx
+  gather_facts: false
+  tags: [always]
+  tasks:
+    - name: Point k8s_node_ip/k8s_master_ip at the real Multipass master IP
+      ansible.builtin.set_fact:
+        k8s_node_ip: "{{ hostvars['localhost']['resolved_k8s_master_ip'] }}"
+        k8s_master_ip: "{{ hostvars['localhost']['resolved_k8s_master_ip'] }}"
+      when: hostvars['localhost']['resolved_k8s_master_ip'] | default('') | length > 0
+
+    - name: Point proxy_lan_ip at the real Multipass nginx IP
+      ansible.builtin.set_fact:
+        proxy_lan_ip: "{{ hostvars['localhost']['resolved_proxy_ip'] }}"
+      when: hostvars['localhost']['resolved_proxy_ip'] | default('') | length > 0
+
 - name: Configure the Oracle XE database tier
   hosts: db
   gather_facts: true

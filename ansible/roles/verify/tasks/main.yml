@@ -15,8 +15,12 @@
   changed_when: false
 
 - name: Each managed server serves the login page directly
+  # This host has no physical LAN bridge, so managed servers are reached
+  # directly at their k8s NodePort (k8s_node_ip:nodeport) instead of the
+  # upstream repo's item.lan_ip:lan_port (a socat-published LAN address that
+  # does not exist here).
   ansible.builtin.uri:
-    url: "http://{{ item.lan_ip }}:{{ item.lan_port }}{{ app_context_root }}/login"
+    url: "http://{{ k8s_node_ip }}:{{ item.nodeport }}{{ app_context_root }}/login"
     return_content: true
     timeout: 15
   register: direct

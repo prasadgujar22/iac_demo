@@ -1,0 +1,56 @@
+#cloud-config
+#
+# Common kubeadm node prep, shared by the master and every worker. kubeadm
+# init/join themselves run later via `multipass exec`, once the VM has a
+# known IP — cloud-init can't know the advertise address at boot.
+#
+hostname: ${hostname}
+manage_etc_hosts: true
+
+ssh_authorized_keys:
+  - ${ssh_authorized_key}
+
+write_files:
+  - path: /etc/modules-load.d/k8s.conf
+    content: |
+      overlay
+      br_netfilter
+  - path: /etc/sysctl.d/98-kubernetes.conf
+    content: |
+      net.bridge.bridge-nf-call-iptables  = 1
+      net.bridge.bridge-nf-call-ip6tables = 1
+      net.ipv4.ip_forward                 = 1
+
+runcmd:
+  # kubeadm refuses to init/join with swap enabled.
+  - swapoff -a
+  - sed -ri '/\sswap\s/s/^#?/#/' /etc/fstab
+
+  - modprobe overlay
+  - modprobe br_netfilter
+  - sysctl --system
+
+  - apt-get update
+  # conntrack is a hard preflight requirement for kubeadm init/join ("ERROR
+  # FileExisting-conntrack") and is not pulled in by containerd; ebtables/
+  # ethtool/socat are used by kube-proxy and kubelet's exec/port-forward.
+  - apt-get install -y apt-transport-https ca-certificates curl gpg containerd conntrack ebtables ethtool socat
+
+  # containerd: switch to SystemdCgroup, required for kubelet's cgroup driver
+  # to match — a mismatch here is the single most common "kubelet won't start"
+  # cause on a fresh node.
+  - mkdir -p /etc/containerd
+  - containerd config default > /etc/containerd/config.toml
+  - sed -i 's/SystemdCgroup = false/SystemdCgroup = true/' /etc/containerd/config.toml
+  - systemctl restart containerd
+  - systemctl enable containerd
+
+  - mkdir -p /etc/apt/keyrings
+  - curl -fsSL https://pkgs.k8s.io/core:/stable:/${k8s_minor_version}/deb/Release.key | gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+  - chmod 644 /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+  - echo "deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/${k8s_minor_version}/deb/ /" > /etc/apt/sources.list.d/kubernetes.list
+  - apt-get update
+  - apt-get install -y kubelet kubeadm kubectl
+  - apt-mark hold kubelet kubeadm kubectl
+
+  - touch /var/lib/cloud/k8s-prereqs-done

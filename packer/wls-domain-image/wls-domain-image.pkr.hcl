@@ -35,7 +35,23 @@ variable "image_name" {
 variable "image_tag" {
   type        = string
   description = "Output image tag. Bump for every model change so rollback is possible."
-  default     = "2.0"
+  default     = "2.6"
+}
+
+variable "wdt_download_url" {
+  type        = string
+  description = <<-EOT
+    WebLogic Deploy Tooling release archive.
+
+    The "generic" WebLogic base image ships WebLogic and a JDK only — no WDT
+    install. Model-in-Image domains need WDT present at
+    spec.configuration.model.wdtInstallHome (default /u01/wdt/weblogic-deploy),
+    or the introspector fails immediately with:
+      "a WebLogic Deploy Tool (WDT) install is not located at ...".
+    Normally the WebLogic Image Tool bakes this in; since this build uses the
+    docker builder directly instead of imagetool, WDT is installed by hand here.
+  EOT
+  default     = "https://github.com/oracle/weblogic-deploy-tooling/releases/latest/download/weblogic-deploy.zip"
 }
 
 variable "domain_name" {
@@ -81,6 +97,11 @@ build {
   provisioner "shell" {
     inline = [
       "set -euo pipefail",
+      "echo '[packer] installing WebLogic Deploy Tooling'",
+      "curl -fsSL -o /tmp/weblogic-deploy.zip '${var.wdt_download_url}'",
+      "unzip -q /tmp/weblogic-deploy.zip -d /u01/wdt",
+      "rm -f /tmp/weblogic-deploy.zip",
+      "chown -R oracle:root /u01/wdt",
       "echo '[packer] staging WDT model'",
       "mkdir -p /u01/wdt/models",
       "cp /tmp/model/*.yaml /u01/wdt/models/ 2>/dev/null || true",

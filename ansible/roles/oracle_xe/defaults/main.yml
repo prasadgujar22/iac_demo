@@ -7,10 +7,16 @@ oracle_app_user: customer_app
 
 # Container runtime settings.
 #
-# 21-slim rather than the full image: ~2GB instead of ~9GB, and it carries the
-# same XEPDB1 pluggable database. gvenzl also publishes oracle-free:23-slim if a
-# newer engine is ever wanted — the JDBC URL shape is unchanged.
-oracle_xe_image: gvenzl/oracle-xe:21-slim
+# oracle-free rather than oracle-xe: gvenzl publishes oracle-xe as amd64 only.
+# On an Apple Silicon host the Multipass VM is arm64, and running amd64 XE
+# under QEMU user-mode emulation crashes the emulator itself
+# ("QEMU internal SIGSEGV") rather than the database — this is a nested
+# virtualization limit (macOS -> arm64 VM -> qemu-user -> amd64), not something
+# fixable by retrying. oracle-free publishes a native arm64 image and gvenzl
+# maintains the same env-var contract (APP_USER/APP_USER_PASSWORD), so only the
+# image and the PDB name (ORACLE_DATABASE, else oracle-free defaults to
+# FREEPDB1) need to change — the JDBC URL shape is otherwise unchanged.
+oracle_xe_image: gvenzl/oracle-free:23-slim
 oracle_container_name: oracle-xe
 
 # Bind-mounted datafiles, so the database survives container recreation.
