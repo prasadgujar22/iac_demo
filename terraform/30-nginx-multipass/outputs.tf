@@ -13,6 +13,11 @@ output "proxy_lan_ip" {
   value       = var.proxy_lan_ip
 }
 
+output "proxy_listen_port" {
+  description = "Port nginx listens on inside the VM. Consumed by the dynamic inventory's shared-state fallback (see ansible/inventory/terraform_inventory.py)."
+  value       = var.proxy_listen_port
+}
+
 output "application_url" {
   description = "Single entry point for the application."
   value       = "http://${var.proxy_lan_ip}:${var.proxy_listen_port}/customer-onboarding/login"
