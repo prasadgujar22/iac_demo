@@ -17,6 +17,16 @@ pipeline {
         timeout(time: 30, unit: 'MINUTES')
     }
 
+    environment {
+        // 'homelab' is this controller's own built-in node; its process PATH
+        // depends on how Jenkins was launched (a LaunchAgent plist Homebrew
+        // regenerates, stripped of any PATH override, on every `brew
+        // services restart`) rather than anything the pipeline controls, so
+        // it must be set explicitly here -- see jenkins/Jenkinsfile for the
+        // full explanation. Without this, kubectl/helm/mvn are invisible.
+        PATH = "/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:${env.PATH}"
+    }
+
     parameters {
         string(name: 'APP_BRANCH', defaultValue: 'main',
                description: 'Application branch to build.')
