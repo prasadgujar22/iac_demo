@@ -220,6 +220,11 @@ set -euo pipefail
                 sh '''#!/bin/bash
 set -euo pipefail
                     cd packer/wls-domain-image
+                    # .generated/ is gitignored (machine-specific output), so a
+                    # fresh CI workspace never has it -- unlike Terraform's
+                    # local_file resource, Packer's manifest post-processor
+                    # does not create its own parent directory.
+                    mkdir -p .generated
                     # Tag by build number so a bad image can be rolled back.
                     packer build \
                       -var "image_tag=2.${BUILD_NUMBER}" \
