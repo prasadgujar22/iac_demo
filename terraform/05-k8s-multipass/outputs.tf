@@ -1,3 +1,18 @@
+output "master_name" {
+  description = "Multipass instance name of the control-plane node."
+  value       = var.master_name
+}
+
+output "worker_names" {
+  description = "Multipass instance names of the worker nodes."
+  value       = var.worker_names
+}
+
+output "worker_names_str" {
+  description = "Worker node instance names, space-joined for shell consumption."
+  value       = join(" ", var.worker_names)
+}
+
 output "master_ip" {
   description = "Control-plane node's Multipass IP."
   value       = data.external.master_vm_ip.result.ip
