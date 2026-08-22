@@ -17,6 +17,7 @@ pipeline {
 
     options {
         timestamps()
+        ansiColor('xterm')                 // interpret Ansible's ANSI color codes instead of dumping raw escape bytes
         disableConcurrentBuilds()          // concurrent terraform runs corrupt state
         buildDiscarder(logRotator(numToKeepStr: '30'))
         timeout(time: 90, unit: 'MINUTES')
