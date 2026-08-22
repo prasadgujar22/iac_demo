@@ -1,8 +1,12 @@
 // ============================================================================
-// Teardown — destructive. Requires an explicit typed confirmation.
+// Teardown — DESTROY permanently removes infrastructure and requires an
+// explicit typed confirmation. SHUTDOWN is non-destructive: it just stops
+// every VM (multipass stop) -- state and data are untouched, folded in from
+// the former homelab-shutdown job. Bring the stack back with homelab-iac (or
+// `multipass start`).
 //
-// Ordered in reverse of provisioning so dependents are removed before their
-// dependencies.
+// DESTROY is ordered in reverse of provisioning so dependents are removed
+// before their dependencies.
 // ============================================================================
 
 pipeline {
@@ -15,14 +19,19 @@ pipeline {
     }
 
     parameters {
+        choice(name: 'ACTION', choices: ['DESTROY', 'SHUTDOWN'],
+               description: 'DESTROY = permanently remove infrastructure with terraform destroy (see CONFIRM/KEEP_DATABASE). SHUTDOWN = non-destructive, just `multipass stop` every VM (see AUTO_APPROVE).')
         string(name: 'CONFIRM', defaultValue: '',
-               description: 'Type DESTROY (exactly) to confirm. Anything else aborts.')
+               description: 'ACTION=DESTROY only. Type DESTROY (exactly) to confirm. Anything else aborts.')
         booleanParam(name: 'KEEP_DATABASE', defaultValue: true,
-               description: 'Keep the Oracle VM. Destroying it DELETES ALL APPLICATION DATA permanently.')
+               description: 'ACTION=DESTROY only. Keep the Oracle VM. Destroying it DELETES ALL APPLICATION DATA permanently.')
+        booleanParam(name: 'AUTO_APPROVE', defaultValue: false,
+               description: 'ACTION=SHUTDOWN only. Skip the confirmation prompt and stop immediately.')
     }
 
     stages {
-        stage('Confirm') {
+        stage('Confirm destroy') {
+            when { expression { params.ACTION == 'DESTROY' } }
             steps {
                 script {
                     if (params.CONFIRM != 'DESTROY') {
@@ -38,7 +47,95 @@ pipeline {
             }
         }
 
+        stage('Discover VM names') {
+            when { expression { params.ACTION == 'SHUTDOWN' } }
+            steps {
+                script {
+                    // Same rationale as the former homelab-shutdown job: read
+                    // names via `terraform console` against var.* defaults so
+                    // this works even when a stack's state is currently empty.
+                    sh '''#!/bin/bash
+set -euo pipefail
+                        for d in terraform/05-k8s-multipass terraform/10-db-multipass terraform/30-nginx-multipass; do
+                            terraform -chdir="$d" init -reconfigure -no-color -input=false >/dev/null
+                        done
+                    '''
+                    env.NGINX_VM = sh(
+                        script: '''echo 'var.vm_name' | terraform -chdir=terraform/30-nginx-multipass console -no-color | tr -d '"' ''',
+                        returnStdout: true
+                    ).trim()
+                    env.DB_VM = sh(
+                        script: '''echo 'var.vm_name' | terraform -chdir=terraform/10-db-multipass console -no-color | tr -d '"' ''',
+                        returnStdout: true
+                    ).trim()
+                    env.MASTER_VM = sh(
+                        script: '''echo 'var.master_name' | terraform -chdir=terraform/05-k8s-multipass console -no-color | tr -d '"' ''',
+                        returnStdout: true
+                    ).trim()
+                    env.WORKER_VMS = sh(
+                        script: '''echo 'join(" ", var.worker_names)' | terraform -chdir=terraform/05-k8s-multipass console -no-color | tr -d '"' ''',
+                        returnStdout: true
+                    ).trim()
+                    echo "nginx=${env.NGINX_VM} master=${env.MASTER_VM} workers=${env.WORKER_VMS} db=${env.DB_VM}"
+                }
+            }
+        }
+
+        stage('Confirm shutdown') {
+            when {
+                allOf {
+                    expression { params.ACTION == 'SHUTDOWN' }
+                    expression { !params.AUTO_APPROVE }
+                }
+            }
+            steps {
+                timeout(time: 10, unit: 'MINUTES') {
+                    input message: 'Stop nginx-proxy, both k8s nodes, and the database VM? (fully reversible -- homelab-iac or multipass start brings them back)',
+                          ok: 'Stop'
+                }
+            }
+        }
+
+        stage('Stop VMs') {
+            when { expression { params.ACTION == 'SHUTDOWN' } }
+            steps {
+                sh '''#!/bin/bash
+set -uo pipefail
+                    # multipass requires client authentication (local.passphrase is set).
+                    # CI runs as a user that is not authenticated, while root bypasses the
+                    # check -- so fall back to sudo, same as every provisioner in this repo.
+                    mp() { if multipass "$@" 2>/dev/null; then return 0; else sudo -n multipass "$@"; fi; }
+
+                    stop_if_running() {
+                        local name="$1"
+                        local state
+                        state=$(mp info "$name" --format csv 2>/dev/null | awk -F, 'NR>1{print $2}')
+                        if [ -z "$state" ]; then
+                            echo "[shutdown] $name: not found, skipping"
+                        elif [ "$state" = "Stopped" ]; then
+                            echo "[shutdown] $name: already stopped"
+                        else
+                            echo "[shutdown] stopping $name"
+                            mp stop "$name"
+                        fi
+                    }
+
+                    # Frontend first, database last: a `stop` is not a graceful
+                    # drain either way, this just mirrors DESTROY's reverse-of-
+                    # provisioning order for consistency.
+                    stop_if_running "$NGINX_VM"
+                    for w in $WORKER_VMS; do stop_if_running "$w"; done
+                    stop_if_running "$MASTER_VM"
+                    stop_if_running "$DB_VM"
+
+                    echo "[shutdown] done:"
+                    mp list
+                '''
+            }
+        }
+
         stage('Stop LAN forwards') {
+            when { expression { params.ACTION == 'DESTROY' } }
             steps {
                 // Remove the bridges first so nothing keeps probing dying backends.
                 sh '''#!/bin/bash
@@ -50,6 +147,7 @@ set -uo pipefail
         }
 
         stage('Destroy nginx tier') {
+            when { expression { params.ACTION == 'DESTROY' } }
             steps {
                 sh '''#!/bin/bash
                     set -euo pipefail
@@ -63,6 +161,7 @@ set -uo pipefail
         }
 
         stage('Destroy WebLogic tier') {
+            when { expression { params.ACTION == 'DESTROY' } }
             steps {
                 sh '''#!/bin/bash
                     set -euo pipefail
@@ -76,7 +175,12 @@ set -uo pipefail
         }
 
         stage('Destroy database tier') {
-            when { expression { !params.KEEP_DATABASE } }
+            when {
+                allOf {
+                    expression { params.ACTION == 'DESTROY' }
+                    expression { !params.KEEP_DATABASE }
+                }
+            }
             steps {
                 sh '''#!/bin/bash
                     set -euo pipefail
@@ -92,9 +196,15 @@ set -uo pipefail
 
     post {
         success {
-            echo params.KEEP_DATABASE
-                ? 'Teardown complete. Database VM retained.'
-                : 'Teardown complete. Everything destroyed, including data.'
+            script {
+                if (params.ACTION == 'SHUTDOWN') {
+                    echo "All VMs stopped. Bring the stack back with homelab-iac, or: multipass start ${env.NGINX_VM} ${env.WORKER_VMS} ${env.MASTER_VM} ${env.DB_VM}"
+                } else {
+                    echo params.KEEP_DATABASE
+                        ? 'Teardown complete. Database VM retained.'
+                        : 'Teardown complete. Everything destroyed, including data.'
+                }
+            }
         }
     }
 }

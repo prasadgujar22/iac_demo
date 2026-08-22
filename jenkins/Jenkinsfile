@@ -1,15 +1,16 @@
 // ============================================================================
 // Full infrastructure + application pipeline
 //
-// AGENT REQUIREMENT
-// Jenkins runs in a Docker container here (jenkins/jenkins:lts-jdk17) which
-// contains ONLY git and ssh — no terraform, ansible, packer, kubectl, lxc or
-// multipass. Those tools must run on the HOST because they drive host-level
-// hypervisors (LXD unix socket, Multipass daemon, libvirt). Installing them in
-// the container would not help.
+// AGENT
+// The 'homelab' label matches this Jenkins controller's own built-in node
+// (see ~/.jenkins/config.xml) running directly on the host — there is no
+// separate Docker or SSH agent. terraform/ansible/packer/kubectl/multipass
+// run directly on the host because they drive host-level hypervisors
+// (Multipass daemon); see the PATH note in the environment{} block below for
+// a real failure mode this causes after a Jenkins restart.
 //
-// Therefore this pipeline requires an SSH agent labelled 'homelab' that points
-// back at the host. Run jenkins/bootstrap-agent.sh once to create it.
+// Starts every VM that exists but is stopped (Start VMs stage below), then
+// creates whatever doesn't exist yet when APPLY=true (Apply infrastructure).
 // ============================================================================
 
 pipeline {
@@ -71,6 +72,97 @@ pipeline {
     }
 
     stages {
+
+        stage('Start VMs') {
+            steps {
+                script {
+                    // Discover each stack's VM name(s) via `terraform console`
+                    // against var.* defaults rather than `terraform output` --
+                    // this works even when a stack has never been applied
+                    // (fresh create) or was destroyed, so the stage can't
+                    // hard-fail on "Output ... not found". Folded in from the
+                    // former homelab-start job.
+                    sh '''#!/bin/bash
+set -euo pipefail
+                        for d in terraform/05-k8s-multipass terraform/10-db-multipass terraform/30-nginx-multipass; do
+                            terraform -chdir="$d" init -reconfigure -no-color -input=false >/dev/null
+                        done
+                    '''
+                    env.NGINX_VM = sh(
+                        script: '''echo 'var.vm_name' | terraform -chdir=terraform/30-nginx-multipass console -no-color | tr -d '"' ''',
+                        returnStdout: true
+                    ).trim()
+                    env.DB_VM = sh(
+                        script: '''echo 'var.vm_name' | terraform -chdir=terraform/10-db-multipass console -no-color | tr -d '"' ''',
+                        returnStdout: true
+                    ).trim()
+                    env.MASTER_VM = sh(
+                        script: '''echo 'var.master_name' | terraform -chdir=terraform/05-k8s-multipass console -no-color | tr -d '"' ''',
+                        returnStdout: true
+                    ).trim()
+                    env.WORKER_VMS = sh(
+                        script: '''echo 'join(" ", var.worker_names)' | terraform -chdir=terraform/05-k8s-multipass console -no-color | tr -d '"' ''',
+                        returnStdout: true
+                    ).trim()
+                    echo "nginx=${env.NGINX_VM} master=${env.MASTER_VM} workers=${env.WORKER_VMS} db=${env.DB_VM}"
+
+                    sh '''#!/bin/bash
+set -uo pipefail
+                        # multipass requires client authentication (local.passphrase is
+                        # set). CI runs as a user that is not authenticated, while root
+                        # bypasses the check -- so fall back to sudo, same as every
+                        # provisioner in this repo.
+                        mp() { if multipass "$@" 2>/dev/null; then return 0; else sudo -n multipass "$@"; fi; }
+
+                        start_if_stopped() {
+                            local name="$1"
+                            local state
+                            state=$(mp info "$name" --format csv 2>/dev/null | awk -F, 'NR>1{print $2}')
+                            if [ -z "$state" ]; then
+                                echo "[start] $name: not found, skipping (Apply infrastructure will create it if APPLY=true)"
+                            elif [ "$state" = "Running" ]; then
+                                echo "[start] $name: already running"
+                            else
+                                echo "[start] starting $name"
+                                mp start "$name"
+                            fi
+                        }
+
+                        # Database and k8s first, nginx last -- the app has
+                        # something to talk to by the time the front door opens.
+                        start_if_stopped "$DB_VM"
+                        start_if_stopped "$MASTER_VM"
+                        for w in $WORKER_VMS; do start_if_stopped "$w"; done
+                        start_if_stopped "$NGINX_VM"
+
+                        echo "[start] current state:"
+                        mp list
+
+                        # If the control-plane VM exists and is (now) running, give the
+                        # API server a little time to come back before Preflight checks
+                        # it -- a node just resumed from `multipass start` is not
+                        # instantly Ready, and Preflight is meant to fail fast on genuine
+                        # faults, not on transient post-boot delay.
+                        if [ -n "${MASTER_VM:-}" ]; then
+                            state=$(mp info "$MASTER_VM" --format csv 2>/dev/null | awk -F, 'NR>1{print $2}')
+                            if [ "$state" = "Running" ]; then
+                                echo "[start] waiting for k8s API and node readiness..."
+                                for i in $(seq 1 30); do
+                                    if kubectl cluster-info >/dev/null 2>&1; then
+                                        notready=$(kubectl get nodes --no-headers 2>/dev/null | awk '$2!="Ready"{c++} END{print c+0}')
+                                        if [ "${notready:-1}" -eq 0 ]; then
+                                            echo "[start] k8s API reachable, all nodes Ready"
+                                            break
+                                        fi
+                                    fi
+                                    sleep 10
+                                done
+                            fi
+                        fi
+                    '''
+                }
+            }
+        }
 
         stage('Preflight') {
             steps {
@@ -141,10 +233,13 @@ set -euo pipefail
         stage('Plan') {
             steps {
                 script {
+                    // 05-k8s-multipass goes first: 20-wls-k8s only configures a
+                    // Domain on an *existing* cluster, so the kubeadm cluster (+
+                    // WLS operator) this stack creates must exist before it runs.
                     // 10-db is skipped entirely in h2 mode — no database to provision.
                     def stacks = params.DB_MODE == 'oracle'
-                        ? ['10-db-multipass', '20-wls-k8s', '30-nginx-multipass']
-                        : ['20-wls-k8s', '30-nginx-multipass']
+                        ? ['05-k8s-multipass', '10-db-multipass', '20-wls-k8s', '30-nginx-multipass']
+                        : ['05-k8s-multipass', '20-wls-k8s', '30-nginx-multipass']
                     stacks.each { s ->
                         sh """#!/bin/bash
 set -euo pipefail
@@ -179,8 +274,8 @@ set -euo pipefail
             steps {
                 script {
                     def stacks = params.DB_MODE == 'oracle'
-                        ? ['10-db-multipass', '20-wls-k8s', '30-nginx-multipass']
-                        : ['20-wls-k8s', '30-nginx-multipass']
+                        ? ['05-k8s-multipass', '10-db-multipass', '20-wls-k8s', '30-nginx-multipass']
+                        : ['05-k8s-multipass', '20-wls-k8s', '30-nginx-multipass']
                     stacks.each { s ->
                         sh "terraform -chdir=terraform/${s} apply -no-color tfplan"
                     }
