@@ -132,7 +132,14 @@
   gather_facts: true
   tags: [network, bridge]
   roles:
-    - lan_bridge
+    # `control` is localhost here (no separate physical control-plane host on
+    # this port), so primary_ip/primary_nic (the original Linux homelab's
+    # physical LAN NIC) never resolve. lan_bridge's own precondition assert
+    # would hard-fail rather than skip, so gate it here instead: run unchanged
+    # on the real Linux host, no-op wherever that NIC doesn't exist. The app
+    # is still reachable directly at nginx's Multipass IP either way.
+    - role: lan_bridge
+      when: primary_ip in (ansible_facts['all_ipv4_addresses'] | default([]))
 
 - name: Build and deploy the application
   hosts: control
