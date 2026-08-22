@@ -80,6 +80,13 @@ if command -v multipass >/dev/null 2>&1; then
 fi
 
 hdr "Kubernetes (WebLogic tier)"
+# MASTER_VM is exported by the Jenkinsfile's "Start VMs" stage (the k8s
+# control-plane VM name from terraform var.master_name); empty when run
+# standalone outside the pipeline.
+MASTER_VM_STATE=""
+if [ -n "${MASTER_VM:-}" ] && command -v multipass >/dev/null 2>&1; then
+    MASTER_VM_STATE=$(multipass info "$MASTER_VM" --format csv 2>/dev/null | awk -F, 'NR>1{print $2}')
+fi
 if kubectl cluster-info >/dev/null 2>&1; then
     ok "k8s API reachable"
     NOTREADY=$(kubectl get nodes --no-headers 2>/dev/null | awk '$2!="Ready"{c++} END{print c+0}')
@@ -104,6 +111,12 @@ if kubectl cluster-info >/dev/null 2>&1; then
     else
         bad "WebLogic operator CRDs absent — install the operator first"
     fi
+elif [ -n "${MASTER_VM:-}" ] && [ -z "$MASTER_VM_STATE" ]; then
+    # The control-plane VM doesn't exist at all -- this is a from-scratch
+    # bootstrap (e.g. right after a teardown), not a broken existing cluster.
+    # "Apply infrastructure" (APPLY=true) is what creates it; failing here
+    # would make it impossible to ever rebuild the stack from nothing.
+    warn "k8s API unreachable -- $MASTER_VM does not exist yet, will be created by Apply infrastructure (APPLY=true)"
 else
     bad "k8s API unreachable (multipass VMs started? kubeconfig valid?)"
 fi
