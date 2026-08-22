@@ -251,16 +251,43 @@ set -euo pipefail
     post {
         success {
             script {
+                // This host has no physical LAN (the 192.168.29.x addresses below
+                // are the original Linux homelab box's); resolve the real Multipass
+                // IPs from Terraform state the same way the "Resolve environment
+                // networking overrides" play in ansible/playbooks/site.yml does,
+                // falling back to the upstream LAN addresses when that stack's
+                // state isn't reachable (e.g. running against the real Linux host).
+                def proxyIp = sh(
+                    script: '''#!/bin/bash
+set -uo pipefail
+terraform -chdir=terraform/30-nginx-multipass init -reconfigure -no-color -input=false >/dev/null 2>&1
+terraform -chdir=terraform/30-nginx-multipass output -raw proxy_internal_ip 2>/dev/null
+''',
+                    returnStdout: true
+                ).trim()
+                if (!proxyIp) { proxyIp = '192.168.29.200' }
+
+                def nodeIp = sh(
+                    script: '''#!/bin/bash
+set -uo pipefail
+terraform -chdir=terraform/05-k8s-multipass init -reconfigure -no-color -input=false >/dev/null 2>&1
+terraform -chdir=terraform/05-k8s-multipass output -raw master_ip 2>/dev/null
+''',
+                    returnStdout: true
+                ).trim()
+                def ms1Endpoint = nodeIp ? "http://${nodeIp}:30701/customer-onboarding/login" : 'http://192.168.29.201:8090/customer-onboarding/login'
+                def ms2Endpoint = nodeIp ? "http://${nodeIp}:30702/customer-onboarding/login" : 'http://192.168.29.202:8090/customer-onboarding/login'
+
                 echo """
 ================================================================
   Pipeline succeeded
 
   APPLICATION URL:
-    http://192.168.29.200/customer-onboarding/login
+    http://${proxyIp}/customer-onboarding/login
 
   Direct per-JVM endpoints:
-    ms1  http://192.168.29.201:8090/customer-onboarding/login
-    ms2  http://192.168.29.202:8090/customer-onboarding/login
+    ms1  ${ms1Endpoint}
+    ms2  ${ms2Endpoint}
 
   Database mode: ${params.DB_MODE}
 ================================================================

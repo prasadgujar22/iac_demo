@@ -83,7 +83,21 @@ set -euo pipefail
 
     post {
         success {
-            echo 'Deployed. http://192.168.29.200/customer-onboarding/login'
+            script {
+                // Resolve the real Multipass proxy IP the same way Jenkinsfile's
+                // main pipeline banner does; this host has no physical LAN, so the
+                // upstream 192.168.29.200 address is unreachable here.
+                def proxyIp = sh(
+                    script: '''#!/bin/bash
+set -uo pipefail
+terraform -chdir=terraform/30-nginx-multipass init -reconfigure -no-color -input=false >/dev/null 2>&1
+terraform -chdir=terraform/30-nginx-multipass output -raw proxy_internal_ip 2>/dev/null
+''',
+                    returnStdout: true
+                ).trim()
+                if (!proxyIp) { proxyIp = '192.168.29.200' }
+                echo "Deployed. http://${proxyIp}/customer-onboarding/login"
+            }
         }
         failure {
             echo 'Deploy failed. If the app returns 503, check whether the managed servers fell into ADMIN mode: kubectl get domain wlsdomain -n wls-domain -o jsonpath="{.status.servers[*].state}"'
