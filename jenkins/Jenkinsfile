@@ -57,6 +57,17 @@ pipeline {
         TF_INPUT    = '0'
         ANSIBLE_FORCE_COLOR = 'true'
         PY_COLORS   = '1'
+        // The 'homelab' agent is just this Jenkins controller's own built-in
+        // node (see ~/.jenkins/config.xml) running directly on macOS, NOT a
+        // separate Docker/SSH agent as the header comment above describes.
+        // Its process PATH comes from whatever launched it (a LaunchAgent
+        // plist that Homebrew regenerates, stripped of any PATH override,
+        // on every `brew services restart`) — so every stage's PATH must be
+        // set explicitly here rather than relying on the controller's
+        // ambient environment. Without this, terraform/packer/ansible/
+        // kubectl/helm/multipass/mvn (all Homebrew-installed) are invisible
+        // and Preflight fails outright.
+        PATH = "/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:${env.PATH}"
     }
 
     stages {
