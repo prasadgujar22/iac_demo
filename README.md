@@ -227,9 +227,13 @@ and destroyed nothing is far more dangerous than one that fails loudly.
 
 All four stacks (including `05-k8s-multipass`, which bootstraps the cluster itself
 via kubeadm — not present in the original three-stack layout) now pin a local
-backend at `/home/jenkins/tfstate/<stack>.tfstate`, outside any workspace, so
+backend at `<jenkins-home>/tfstate/<stack>.tfstate`, outside any workspace, so
 plan/apply and teardown share one view of reality and a workspace wipe cannot
-orphan live infrastructure.
+orphan live infrastructure. On the reference Ubuntu host, where Jenkins runs as
+the system `jenkins` user, that's `/home/jenkins/tfstate/`; this checkout runs
+Jenkins as `prasad_mac` on macOS, so the `backend.tf` files here point at
+`/Users/prasad_mac/.homelab-iac/tfstate/` instead — match the path to whatever
+user Jenkins actually runs as on your host.
 
 ### Jenkins credentials the pipelines expect
 

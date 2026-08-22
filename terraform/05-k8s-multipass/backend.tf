@@ -3,6 +3,6 @@
 ##
 terraform {
   backend "local" {
-    path = "/home/jenkins/tfstate/05-k8s-multipass.tfstate"
+    path = "/Users/prasad_mac/.homelab-iac/tfstate/05-k8s-multipass.tfstate"
   }
 }
