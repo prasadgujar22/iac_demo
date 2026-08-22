@@ -233,17 +233,65 @@ set -euo pipefail
             }
         }
 
+        stage('Plan k8s tier') {
+            steps {
+                // 05-k8s-multipass is planned (and, below, applied) on its own,
+                // ahead of everything else: 20-wls-k8s's kubernetes_manifest
+                // resources need a live, reachable k8s API just to compute a
+                // PLAN (not only to apply) -- they fetch the CRD's OpenAPI
+                // schema from the cluster itself. On a from-scratch bootstrap
+                // (e.g. right after a full teardown) that cluster doesn't
+                // exist yet, so planning it together with the other stacks
+                // before any apply has happened fails with "Invalid
+                // configuration for API client ... dial tcp ... timeout".
+                // Applying this stack first (when APPLY=true) makes the
+                // cluster live before 20-wls-k8s is ever planned.
+                sh '''#!/bin/bash
+set -euo pipefail
+                    terraform -chdir=terraform/05-k8s-multipass init -reconfigure -no-color -input=false
+                    terraform -chdir=terraform/05-k8s-multipass plan -no-color -out=tfplan
+                '''
+            }
+        }
+
+        stage('Approve apply — k8s tier') {
+            when { expression { params.APPLY } }
+            steps {
+                script {
+                    timeout(time: 15, unit: 'MINUTES') {
+                        input message: 'Apply the k8s tier (VMs + kubeadm cluster)? It must exist before the WebLogic-on-k8s stack can even be planned.',
+                              ok: 'Apply'
+                    }
+                }
+            }
+        }
+
+        stage('Apply k8s tier') {
+            when { expression { params.APPLY } }
+            steps {
+                sh 'terraform -chdir=terraform/05-k8s-multipass apply -no-color tfplan'
+            }
+        }
+
         stage('Plan') {
             steps {
                 script {
-                    // 05-k8s-multipass goes first: 20-wls-k8s only configures a
-                    // Domain on an *existing* cluster, so the kubeadm cluster (+
-                    // WLS operator) this stack creates must exist before it runs.
                     // 10-db is skipped entirely in h2 mode — no database to provision.
                     def stacks = params.DB_MODE == 'oracle'
-                        ? ['05-k8s-multipass', '10-db-multipass', '20-wls-k8s', '30-nginx-multipass']
-                        : ['05-k8s-multipass', '20-wls-k8s', '30-nginx-multipass']
+                        ? ['10-db-multipass', '20-wls-k8s', '30-nginx-multipass']
+                        : ['20-wls-k8s', '30-nginx-multipass']
                     stacks.each { s ->
+                        if (s == '20-wls-k8s' && sh(script: 'kubectl cluster-info >/dev/null 2>&1', returnStatus: true) != 0) {
+                            // Only reachable here with APPLY=false (a pure dry
+                            // run/preview): the k8s tier above only PLANS in
+                            // that mode, so the cluster never actually comes
+                            // up. Skip this one stack's plan instead of
+                            // failing the whole preview -- there's nothing
+                            // meaningful to preview against a cluster that
+                            // doesn't exist yet.
+                            echo "[plan] skipping 20-wls-k8s: k8s API unreachable (cluster not created yet -- re-run with APPLY=true to create it, then this stack can be planned/applied)"
+                            return
+                        }
                         sh """#!/bin/bash
 set -euo pipefail
                             # -reconfigure: the workspace may hold a stale local state file from a
@@ -277,8 +325,8 @@ set -euo pipefail
             steps {
                 script {
                     def stacks = params.DB_MODE == 'oracle'
-                        ? ['05-k8s-multipass', '10-db-multipass', '20-wls-k8s', '30-nginx-multipass']
-                        : ['05-k8s-multipass', '20-wls-k8s', '30-nginx-multipass']
+                        ? ['10-db-multipass', '20-wls-k8s', '30-nginx-multipass']
+                        : ['20-wls-k8s', '30-nginx-multipass']
                     stacks.each { s ->
                         sh "terraform -chdir=terraform/${s} apply -no-color tfplan"
                     }
