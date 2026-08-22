@@ -19,12 +19,24 @@ PRIMARY_NIC="${PRIMARY_NIC:-enp0s31f6}"
 PRIMARY_IP="${PRIMARY_IP:-192.168.29.159}"
 
 hdr "Toolchain"
-for t in terraform packer ansible-playbook kubectl helm multipass lxc socat mvn java git; do
+for t in terraform packer ansible-playbook kubectl helm multipass mvn java git; do
     if command -v "$t" >/dev/null 2>&1; then ok "$t present"; else bad "$t missing"; fi
+done
+# lxc (LXD/MicroCloud) and socat (the lan_bridge role's LAN-publishing) are
+# only needed by the Linux LAN-bridge host path, which is skipped entirely on
+# hosts that reach nginx directly at its Multipass IP instead — a hard FAIL
+# here would block every other host's preflight for a tool it will never use.
+for t in lxc socat; do
+    if command -v "$t" >/dev/null 2>&1; then ok "$t present"; else warn "$t missing (only needed for the Linux LAN-bridge path)"; fi
 done
 
 hdr "Primary NIC (host's only LAN path — must never be disturbed)"
-if ip link show "$PRIMARY_NIC" >/dev/null 2>&1; then
+if ! command -v ip >/dev/null 2>&1; then
+    # No `ip` command at all (e.g. macOS) means this isn't the Linux host the
+    # check was written for — the LAN-bridge role that depends on this NIC is
+    # skipped entirely on such hosts, so there is nothing here to protect.
+    warn "no 'ip' command — not the Linux LAN-bridge host, skipping this check"
+elif ip link show "$PRIMARY_NIC" >/dev/null 2>&1; then
     ok "$PRIMARY_NIC present"
     if ip -4 addr show "$PRIMARY_NIC" | grep -q "$PRIMARY_IP"; then
         ok "$PRIMARY_NIC holds $PRIMARY_IP"
@@ -78,7 +90,16 @@ if kubectl cluster-info >/dev/null 2>&1; then
         bad "$NOTREADY k8s node(s) NotReady — check Flannel: kubectl -n kube-flannel get pods"
     fi
     # Domain CRD version differs per kind: domains=v9, clusters=v1.
-    if kubectl api-resources 2>/dev/null | grep -q "weblogic.oracle"; then
+    #
+    # Capture first, then grep the variable — NOT `kubectl ... | grep -q`.
+    # Under `set -o pipefail`, grep -q exits the instant it finds a match,
+    # closing its end of the pipe while kubectl may still be writing further
+    # output; kubectl then dies of SIGPIPE and pipefail reports THAT exit
+    # code for the whole pipeline, masking grep's own successful match. This
+    # made the check fail intermittently even with the CRDs genuinely
+    # installed — flaky in a way that looked like a real absence.
+    API_RESOURCES="$(kubectl api-resources 2>/dev/null || true)"
+    if grep -q "weblogic.oracle" <<< "$API_RESOURCES"; then
         ok "WebLogic operator CRDs installed"
     else
         bad "WebLogic operator CRDs absent — install the operator first"
@@ -95,7 +116,8 @@ SSH_KEY="${SSH_KEY:-$HOME/.ssh/homelab_iac_ed25519}"
 if [ -f "${SSH_KEY}.pub" ]; then
     ok "$(basename "${SSH_KEY}").pub present"
     if [ -f "$SSH_KEY" ]; then
-        PERM=$(stat -c '%a' "$SSH_KEY" 2>/dev/null)
+        # GNU stat (-c) vs BSD/macOS stat (-f): try GNU first, fall back to BSD.
+        PERM=$(stat -c '%a' "$SSH_KEY" 2>/dev/null || stat -f '%OLp' "$SSH_KEY" 2>/dev/null)
         if [ "$PERM" = "600" ]; then
             ok "private key permissions 600"
         else
@@ -109,7 +131,10 @@ else
 fi
 
 hdr "Disk headroom"
+# GNU df (--output=avail -BG) vs BSD/macOS df: -g reports whole gigabytes and
+# has no --output flag, so fall back to counting a fixed column instead.
 AVAIL=$(df --output=avail -BG / 2>/dev/null | tail -1 | tr -dc '0-9')
+[ -z "$AVAIL" ] && AVAIL=$(df -g / 2>/dev/null | tail -1 | awk '{print $4}')
 if [ "${AVAIL:-0}" -ge 20 ]; then
     ok "root filesystem has ${AVAIL}G free"
 else
