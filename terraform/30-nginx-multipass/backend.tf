@@ -12,6 +12,6 @@
 ##
 terraform {
   backend "local" {
-    path = "/Users/prasad_mac/.homelab-iac/tfstate/30-nginx-multipass.tfstate"
+    path = "/home/jenkins/tfstate/30-nginx-multipass.tfstate"
   }
 }

@@ -12,6 +12,6 @@
 ##
 terraform {
   backend "local" {
-    path = "/Users/prasad_mac/.homelab-iac/tfstate/20-wls-k8s.tfstate"
+    path = "/home/jenkins/tfstate/20-wls-k8s.tfstate"
   }
 }

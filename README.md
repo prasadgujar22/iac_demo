@@ -35,6 +35,7 @@ Only the LAN entry point needs a bridge, because Multipass VMs are NAT'd.
 | Path | Tool | Responsibility |
 |---|---|---|
 | `packer/wls-domain-image/` | Packer | WebLogic Model-in-Image domain image |
+| `terraform/05-k8s-multipass/` | Terraform | Kubeadm K8s cluster (control-plane + worker VMs) + WLS operator |
 | `terraform/10-db-multipass/` | Terraform | VM that *hosts* the Oracle XE container |
 | `terraform/20-wls-k8s/` | Terraform | Namespace, secrets, Domain/Cluster CRs, NodePorts |
 | `terraform/30-nginx-multipass/` | Terraform | nginx proxy VM |
@@ -224,9 +225,11 @@ Finished: SUCCESS
 while every VM kept running. A pipeline that claims to have destroyed everything
 and destroyed nothing is far more dangerous than one that fails loudly.
 
-All three stacks now pin a local backend at `/home/jenkins/tfstate/<stack>.tfstate`,
-outside any workspace, so plan/apply and teardown share one view of reality and a
-workspace wipe cannot orphan live infrastructure.
+All four stacks (including `05-k8s-multipass`, which bootstraps the cluster itself
+via kubeadm — not present in the original three-stack layout) now pin a local
+backend at `/home/jenkins/tfstate/<stack>.tfstate`, outside any workspace, so
+plan/apply and teardown share one view of reality and a workspace wipe cannot
+orphan live infrastructure.
 
 ### Jenkins credentials the pipelines expect
 
