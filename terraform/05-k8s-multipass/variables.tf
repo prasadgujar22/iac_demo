@@ -62,14 +62,22 @@ variable "worker_disk" {
 
 variable "launch_timeout" {
   description = "Seconds multipass may take to launch before failing."
+  # Cold apt install of kubelet/kubeadm/kubectl/containerd with no cached
+  # packages after a full teardown was observed to exceed 600s (worker_vm and
+  # master_vm launching concurrently at the time made it worse -- now
+  # serialized, see worker_vm's depends_on, but 600s was already tight even
+  # for one VM cold). A mp_helper quirk means the resulting error looks like
+  # a sudo/permissions failure rather than a timeout, which is confusing.
   type        = number
-  default     = 600
+  default     = 1200
 }
 
 variable "kubeadm_timeout" {
   description = "Seconds to wait for kubeadm init / join / node-ready."
+  # Bumped alongside launch_timeout for the same reason: kubeadm init/join
+  # pulls control-plane images fresh on a cold host with no image cache.
   type        = number
-  default     = 600
+  default     = 1200
 }
 
 variable "install_weblogic_operator" {

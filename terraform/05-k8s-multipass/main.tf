@@ -193,7 +193,13 @@ resource "null_resource" "worker_vm" {
     EOT
   }
 
-  depends_on = [local_file.worker_cloud_init]
+  # Serialized after master_vm on purpose: both VMs' cloud-init grabs
+  # whatever IP DHCP just handed enp0s1 and pins it statically with no
+  # uniqueness check (see cloud-init.yaml.tftpl) -- launching concurrently
+  # let their DHCP requests race and get the SAME address handed to both,
+  # permanently colliding once pinned. Serializing also avoids both VMs'
+  # cold, cache-less apt installs contending for CPU/network at once.
+  depends_on = [local_file.worker_cloud_init, null_resource.master_vm]
 }
 
 data "external" "master_vm_ip" {
