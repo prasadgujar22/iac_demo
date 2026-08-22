@@ -213,20 +213,18 @@ set -euo pipefail
         stage('Build domain image') {
             when { expression { params.BUILD_IMAGE } }
             steps {
-                withCredentials([usernamePassword(
-                    credentialsId: 'wls-admin',
-                    usernameVariable: 'WLS_USER',
-                    passwordVariable: 'WLS_PASS')]) {
-                    sh '''#!/bin/bash
+                // Admin credentials are no longer baked into the image -- the
+                // WDT model resolves them from the operator's
+                // __weblogic-credentials__ K8s secret at domain-creation time
+                // (see terraform/20-wls-k8s), so packer needs no credentials.
+                sh '''#!/bin/bash
 set -euo pipefail
-                        cd packer/wls-domain-image
-                        # Tag by build number so a bad image can be rolled back.
-                        packer build \
-                          -var "image_tag=2.${BUILD_NUMBER}" \
-                          -var "admin_username=${WLS_USER}" \
-                          .
-                    '''
-                }
+                    cd packer/wls-domain-image
+                    # Tag by build number so a bad image can be rolled back.
+                    packer build \
+                      -var "image_tag=2.${BUILD_NUMBER}" \
+                      .
+                '''
             }
         }
 
