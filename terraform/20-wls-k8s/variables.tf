@@ -31,7 +31,7 @@ variable "domain_home" {
 variable "domain_image" {
   description = "Model-in-Image domain image, produced by the Packer stage."
   type        = string
-  default     = "wls-domain-image:1.6"
+  default     = "wls-domain-image:2.6"
 }
 
 variable "cluster_name" {
