@@ -89,14 +89,24 @@ resource "null_resource" "db_vm" {
       if mp info "${var.vm_name}" >/dev/null 2>&1; then
         echo "[db] ${var.vm_name} already exists — skipping launch"
       else
-        echo "[db] launching ${var.vm_name}"
-        mp launch "${var.image}" \
+        echo "[db] launching ${var.vm_name} (this can take a few minutes)"
+        # multipass draws a spinner with \r that Terraform's non-TTY log
+        # capture turns into one line per frame; send it to a log file
+        # instead and only show it if the launch actually fails.
+        LAUNCH_LOG=$(mktemp)
+        if ! mp launch "${var.image}" \
           --name "${var.vm_name}" \
           --cpus "${var.cpus}" \
           --memory "${var.memory}" \
           --disk "${var.disk}" \
           --cloud-init "${local_file.cloud_init.filename}" \
-          --timeout ${var.launch_timeout}
+          --timeout ${var.launch_timeout} >"$LAUNCH_LOG" 2>&1; then
+          echo "[db] ERROR: multipass launch failed:" >&2
+          cat "$LAUNCH_LOG" >&2
+          rm -f "$LAUNCH_LOG"
+          exit 1
+        fi
+        rm -f "$LAUNCH_LOG"
       fi
 
       # A VM reports an IP before its SSH/agent stack is ready; wait for both.
