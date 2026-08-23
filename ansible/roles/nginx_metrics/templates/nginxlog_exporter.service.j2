@@ -1,0 +1,25 @@
+# Managed by Ansible (nginx_metrics role) — local edits are overwritten.
+[Unit]
+Description=Prometheus exporter for nginx access log request timings
+Documentation=https://github.com/martin-helmich/prometheus-nginxlog-exporter
+After=network-online.target nginx.service
+Wants=network-online.target
+
+[Service]
+User={{ nginx_exporter_user }}
+# nginx writes its logs 0640 root:adm, so the exporter needs the adm group to
+# read them at all. Running it as root to avoid that would be a much worse
+# trade for a process whose whole job is tailing a file.
+SupplementaryGroups=adm
+Type=simple
+ExecStart={{ nginxlog_exporter_bin }} -config-file {{ nginxlog_exporter_config }}
+Restart=on-failure
+RestartSec=5
+
+NoNewPrivileges=true
+ProtectHome=true
+ProtectSystem=strict
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

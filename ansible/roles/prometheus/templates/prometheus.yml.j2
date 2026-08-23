@@ -41,6 +41,18 @@ scrape_configs:
 {% endfor %}
 {% endif %}
 
+{% if groups.get('nginx', []) %}
+  # Request DURATION, parsed from the access log. A separate job from `nginx`
+  # above because it is a separate exporter reading a different source:
+  # stub_status counts requests, it does not time them.
+  - job_name: nginx-latency
+    static_configs:
+{% for h in groups.get('nginx', []) %}
+      - targets: ['{{ hostvars[h].ansible_host }}:{{ nginxlog_exporter_port }}']
+        labels: {tier: proxy, vm: {{ h }}}
+{% endfor %}
+{% endif %}
+
 {% if hostvars['localhost'].kube_state_metrics_endpoint | default('') %}
   # The state of Kubernetes objects: deployments, pod phases, restart counts.
   - job_name: kube-state-metrics

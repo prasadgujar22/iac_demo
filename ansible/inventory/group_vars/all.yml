@@ -91,3 +91,20 @@ proxy_listen_port: 80
 # it is correct whether the repo sits in a developer's home directory or in a
 # Jenkins job workspace — the two differ, and hardcoding either breaks the other.
 repo_root: "{{ (inventory_dir | dirname) | dirname }}"
+
+# --- proxy access log format -------------------------------------------------
+# ONE definition, used twice: nginx's log_format directive writes it, and
+# prometheus-nginxlog-exporter parses it. They must agree exactly -- a mismatch
+# does not fail loudly, it silently produces parse errors and no latency data --
+# so neither role is allowed its own copy.
+#
+# This is nginx's stock "combined" format plus rt=$request_time. That field is
+# the whole point: stub_status exposes counts only, so request DURATION exists
+# nowhere else, and without it no percentile can be computed at all.
+#
+# $upstream_response_time is deliberately NOT included. Requests nginx answers
+# itself -- redirects, the health endpoint, 404s -- log it as "-", which the
+# exporter cannot parse as a number, and every one of those lines would be
+# dropped with a parse error.
+nginx_log_format_name: wls_timed
+nginx_log_format: '$remote_addr - $remote_user [$time_local] "$request" $status $body_bytes_sent "$http_referer" "$http_user_agent" rt=$request_time'

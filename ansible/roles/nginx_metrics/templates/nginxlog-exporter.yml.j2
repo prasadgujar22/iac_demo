@@ -1,0 +1,27 @@
+# Managed by Ansible (nginx_metrics role) — local edits are overwritten.
+listen:
+  port: {{ nginxlog_exporter_port }}
+  address: "0.0.0.0"
+  metrics_endpoint: /metrics
+
+namespaces:
+  - name: nginx
+    # Must match the log_format in wls-proxy.conf EXACTLY. Both come from
+    # nginx_log_format in group_vars/all.yml precisely so they cannot drift:
+    # a mismatch yields parse errors and no data, not an error anyone sees.
+    format: "{{ nginx_log_format }}"
+    source:
+      files:
+        - {{ nginxlog_access_log }}
+    histogram_buckets: {{ nginxlog_buckets | to_json }}
+    # Relabels the request into a low-cardinality path label. Without this every
+    # distinct query string becomes its own series -- the classic way to make a
+    # small Prometheus fall over.
+    relabel_configs:
+      - target_label: path
+        from: request_uri
+        split: 1
+        matches:
+          - regexp: ^/customer-onboarding.*
+            replacement: /customer-onboarding
+        separator: ""

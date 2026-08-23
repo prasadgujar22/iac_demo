@@ -21,6 +21,7 @@ prometheus_uid: 65534
 # Ports the scrape targets listen on. Must match the exporter roles.
 node_exporter_port: 9100
 nginx_exporter_port: 9113
+nginxlog_exporter_port: 9114
 kubelet_port: 10250
 
 observability_state: present

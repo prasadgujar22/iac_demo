@@ -17,6 +17,14 @@
       become: true
       failed_when: false
 
+    - name: Stop and disable the latency exporter
+      ansible.builtin.systemd:
+        name: nginxlog_exporter
+        state: stopped
+        enabled: false
+      become: true
+      failed_when: false
+
     - name: Remove exporter files
       ansible.builtin.file:
         path: "{{ item }}"
@@ -25,6 +33,13 @@
       loop:
         - /etc/systemd/system/nginx_exporter.service
         - "{{ nginx_exporter_bin }}"
+        - /etc/systemd/system/nginxlog_exporter.service
+        - "{{ nginxlog_exporter_bin }}"
+        - "{{ nginxlog_exporter_config }}"
+        - "{{ nginxlog_exporter_bin }}.version"
+      # NOTE: the log_format itself is NOT removed. It lives in wls-proxy.conf,
+      # owned by the nginx_proxy role, precisely so that removing monitoring
+      # cannot leave that file referencing a format that no longer exists.
 
     - name: Reload systemd after removing the unit
       ansible.builtin.systemd:
@@ -160,3 +175,171 @@
       until:
         - nex_probe is succeeded
         - "'nginx_up 1' in nex_probe.content"
+
+    # ---- request latency ----------------------------------------------------
+    # A second exporter, reading the access log, because stub_status carries no
+    # timing at all. This is what makes p99 possible.
+
+    # The timed log_format lives in wls-proxy.conf, which belongs to the
+    # nginx_proxy role and is written by homelab-iac -- NOT by this pipeline.
+    # That separation is deliberate: monitoring must not depend on the
+    # monitored application being healthy, and running nginx_proxy here would
+    # make an observability deploy fail whenever WebLogic was down.
+    #
+    # The cost is this ordering dependency, so state it plainly instead of
+    # letting it surface as an exporter that parses nothing.
+    - name: Check the proxy is logging request times
+      ansible.builtin.command: "grep -q 'access_log .*{{ nginx_log_format_name }}' /etc/nginx/sites-available/wls-proxy.conf"
+      become: true
+      register: fmt_check
+      changed_when: false
+      failed_when: false
+
+    - name: Fail with the fix when the proxy is not logging request times
+      ansible.builtin.fail:
+        msg: >-
+          {{ inventory_hostname }} is still writing its access log in nginx's
+          default format, which carries no $request_time, so no latency can be
+          measured. The timed format ships in wls-proxy.conf via the
+          nginx_proxy role: run the homelab-iac pipeline (its Configure stage
+          re-templates the proxy), then re-run this one.
+      when: fmt_check.rc != 0
+
+    # Guarded by a stamp file rather than `--version` output: the flag and the
+    # stream it prints on differ between exporters (node_exporter uses stdout,
+    # the stub_status exporter stderr), and a guard that never matches silently
+    # re-downloads on every run forever.
+    - name: Check which latency exporter version is installed
+      ansible.builtin.slurp:
+        src: "{{ nginxlog_exporter_bin }}.version"
+      become: true
+      register: nlex_stamp
+      failed_when: false
+
+    - name: Install the latency exporter binary
+      when: (nlex_stamp.content | default('') | b64decode | trim) != nginxlog_exporter_version
+      become: true
+      block:
+        - name: Download the latency exporter release
+          ansible.builtin.get_url:
+            url: >-
+              {{ nginxlog_exporter_base_url }}/v{{ nginxlog_exporter_version }}/prometheus-nginxlog-exporter_{{ nginxlog_exporter_version }}_linux_{{ nginx_exporter_arch }}.tar.gz
+            dest: /tmp/nginxlog_exporter.tar.gz
+            mode: "0644"
+            timeout: 60
+
+        - name: Unpack the release
+          ansible.builtin.unarchive:
+            src: /tmp/nginxlog_exporter.tar.gz
+            dest: /tmp
+            remote_src: true
+            list_files: true
+          register: nlex_unpacked
+
+        # The archive's internal layout is not guaranteed across releases, so
+        # find the binary rather than assuming a path that a later version may
+        # move.
+        - name: Locate the unpacked binary
+          ansible.builtin.find:
+            paths: /tmp
+            patterns: prometheus-nginxlog-exporter
+            recurse: true
+            file_type: file
+          register: nlex_found
+
+        - name: Fail clearly if the archive layout changed
+          ansible.builtin.fail:
+            msg: >-
+              prometheus-nginxlog-exporter was not found in the extracted
+              archive. Files: {{ nlex_unpacked.files | default([]) | join(', ') }}
+          when: nlex_found.files | length == 0
+
+        - name: Install the binary
+          ansible.builtin.copy:
+            src: "{{ nlex_found.files[0].path }}"
+            dest: "{{ nginxlog_exporter_bin }}"
+            remote_src: true
+            owner: root
+            group: root
+            mode: "0755"
+          notify: restart nginxlog_exporter
+
+        - name: Record the installed version
+          ansible.builtin.copy:
+            content: "{{ nginxlog_exporter_version }}\n"
+            dest: "{{ nginxlog_exporter_bin }}.version"
+            owner: root
+            group: root
+            mode: "0644"
+
+        - name: Clean up the download
+          ansible.builtin.file:
+            path: "{{ item }}"
+            state: absent
+          loop:
+            - /tmp/nginxlog_exporter.tar.gz
+
+    - name: Install the latency exporter configuration
+      ansible.builtin.template:
+        src: nginxlog-exporter.yml.j2
+        dest: "{{ nginxlog_exporter_config }}"
+        owner: root
+        group: root
+        mode: "0644"
+      become: true
+      notify: restart nginxlog_exporter
+
+    - name: Install the latency exporter unit
+      ansible.builtin.template:
+        src: nginxlog_exporter.service.j2
+        dest: /etc/systemd/system/nginxlog_exporter.service
+        owner: root
+        group: root
+        mode: "0644"
+      become: true
+      notify: restart nginxlog_exporter
+
+    - name: Enable and start the latency exporter
+      ansible.builtin.systemd:
+        name: nginxlog_exporter
+        state: started
+        enabled: true
+        daemon_reload: true
+      become: true
+
+    - name: Apply any pending restart before probing
+      ansible.builtin.meta: flush_handlers
+
+    # A histogram with no observations exposes no buckets at all, so a fresh
+    # exporter looks identical to a broken one. Generate a request first, then
+    # assert the buckets exist -- that proves the whole path: nginx wrote a
+    # timed line, the exporter parsed it, and the metric is being served.
+    - name: Generate a request so there is something to measure
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ proxy_listen_port | default(80) }}/proxy-health"
+        status_code: [200, 404]
+      retries: 3
+      delay: 2
+
+    - name: Verify request timings are being parsed
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ nginxlog_exporter_port }}/metrics"
+        return_content: true
+        status_code: 200
+      register: nlex_probe
+      retries: 10
+      delay: 3
+      until:
+        - nlex_probe is succeeded
+        - "'nginx_http_response_time_seconds_bucket' in nlex_probe.content"
+
+    # Parse errors mean the log_format and the exporter's format disagree --
+    # the one failure mode this design is most exposed to, and it produces an
+    # exporter that is up, serving, and reporting nothing.
+    - name: Warn if any log lines failed to parse
+      ansible.builtin.debug:
+        msg: >-
+          WARNING: the latency exporter reported parse errors. The log_format in
+          wls-proxy.conf and nginx_log_format in group_vars/all.yml have
+          diverged.
+      when: "'nginx_parse_errors_total 0' not in nlex_probe.content"

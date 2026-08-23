@@ -16,3 +16,22 @@ nginx_stub_status_port: 8081
 nginx_stub_status_path: /stub_status
 
 observability_state: present
+
+# --- request latency ---------------------------------------------------------
+# stub_status has no timing data of any kind, so p99 cannot come from the
+# exporter above. This second exporter reads the access log instead and turns
+# $request_time into a real Prometheus histogram, which is what
+# histogram_quantile() needs -- a quantile computed from a plain gauge would be
+# a quantile of nothing.
+nginxlog_exporter_version: "1.11.0"
+nginxlog_exporter_base_url: "https://github.com/martin-helmich/prometheus-nginxlog-exporter/releases/download"
+nginxlog_exporter_bin: /usr/local/bin/prometheus-nginxlog-exporter
+nginxlog_exporter_config: /etc/prometheus-nginxlog-exporter.yml
+nginxlog_exporter_port: 9114
+nginxlog_access_log: /var/log/nginx/wls-proxy.access.log
+
+# Buckets decide what the percentiles can actually resolve: a value between two
+# boundaries is interpolated, so p99 is only as precise as the bucket it lands
+# in. Weighted towards the fast end, where this application's requests live,
+# with headroom up to 10s for the tail that matters.
+nginxlog_buckets: [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10]

@@ -67,11 +67,21 @@ upstream wls_balanced {
 {% endfor %}
 }
 
+# Defined HERE, in the proxy's own config, rather than alongside the exporter
+# that reads it. The observability stack is optional and removable; this file is
+# not. Were the format defined in the metrics drop-in, tearing down monitoring
+# would delete it while this access_log still referenced it by name -- nginx -t
+# would then fail and the next reload would take the PROXY down. Tearing down
+# monitoring must never be able to break the thing being monitored.
+#
+# Harmless with no exporter present: it just adds rt= to each line.
+log_format {{ nginx_log_format_name }} '{{ nginx_log_format }}';
+
 server {
     listen {{ proxy_listen_port }} default_server;
     server_name _;
 
-    access_log /var/log/nginx/wls-proxy.access.log;
+    access_log /var/log/nginx/wls-proxy.access.log {{ nginx_log_format_name }};
     error_log  /var/log/nginx/wls-proxy.error.log;
 
     location = / {
