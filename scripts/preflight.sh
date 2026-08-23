@@ -87,14 +87,29 @@ MASTER_VM_STATE=""
 if [ -n "${MASTER_VM:-}" ] && command -v multipass >/dev/null 2>&1; then
     MASTER_VM_STATE=$(multipass info "$MASTER_VM" --format csv 2>/dev/null | awk -F, 'NR>1{print $2}')
 fi
-if kubectl cluster-info >/dev/null 2>&1; then
+# APPLY is the pipeline's own boolean parameter, exported into every sh step.
+# When it's true, the "Apply k8s tier" stage runs later in THIS build and is
+# exactly what repairs a missing or half-built cluster (kubeadm init/join,
+# Flannel, the operator Helm release, and the host kubeconfig). Blocking here
+# on the very conditions that stage fixes is the bootstrap deadlock this check
+# already avoids for a missing VM -- an interrupted bootstrap leaves the VM
+# present but the cluster incomplete, which is the same situation. So under
+# APPLY=true these are warnings; under APPLY=false (dry run) they stay hard
+# failures, because then nothing in the build will fix them.
+K8S_REPAIRABLE=0
+[ "${APPLY:-false}" = "true" ] && K8S_REPAIRABLE=1
+k8s_bad() { if [ "$K8S_REPAIRABLE" -eq 1 ]; then warn "$* -- APPLY=true, 'Apply k8s tier' will repair this"; else bad "$*"; fi; }
+# --request-timeout: an unreachable endpoint otherwise costs kubectl's full
+# 30s dial timeout per call, which is what made a stale kubeconfig look like a
+# hang rather than a fast, clear failure.
+if kubectl --request-timeout=5s cluster-info >/dev/null 2>&1; then
     ok "k8s API reachable"
-    NOTREADY=$(kubectl get nodes --no-headers 2>/dev/null | awk '$2!="Ready"{c++} END{print c+0}')
+    NOTREADY=$(kubectl --request-timeout=5s get nodes --no-headers 2>/dev/null | awk '$2!="Ready"{c++} END{print c+0}')
     if [ "$NOTREADY" -eq 0 ]; then
         ok "all k8s nodes Ready"
     else
         # Flannel subnet.env corruption after a node restart is the usual cause.
-        bad "$NOTREADY k8s node(s) NotReady — check Flannel: kubectl -n kube-flannel get pods"
+        k8s_bad "$NOTREADY k8s node(s) NotReady — check Flannel: kubectl -n kube-flannel get pods"
     fi
     # Domain CRD version differs per kind: domains=v9, clusters=v1.
     #
@@ -105,11 +120,11 @@ if kubectl cluster-info >/dev/null 2>&1; then
     # code for the whole pipeline, masking grep's own successful match. This
     # made the check fail intermittently even with the CRDs genuinely
     # installed — flaky in a way that looked like a real absence.
-    API_RESOURCES="$(kubectl api-resources 2>/dev/null || true)"
+    API_RESOURCES="$(kubectl --request-timeout=10s api-resources 2>/dev/null || true)"
     if grep -q "weblogic.oracle" <<< "$API_RESOURCES"; then
         ok "WebLogic operator CRDs installed"
     else
-        bad "WebLogic operator CRDs absent — install the operator first"
+        k8s_bad "WebLogic operator CRDs absent — install the operator first"
     fi
 elif [ -n "${MASTER_VM:-}" ] && [ -z "$MASTER_VM_STATE" ]; then
     # The control-plane VM doesn't exist at all -- this is a from-scratch
@@ -118,7 +133,11 @@ elif [ -n "${MASTER_VM:-}" ] && [ -z "$MASTER_VM_STATE" ]; then
     # would make it impossible to ever rebuild the stack from nothing.
     warn "k8s API unreachable -- $MASTER_VM does not exist yet, will be created by Apply infrastructure (APPLY=true)"
 else
-    bad "k8s API unreachable (multipass VMs started? kubeconfig valid?)"
+    # Covers the interrupted-bootstrap case: the control-plane VM is up but the
+    # cluster behind it is incomplete (no CNI, worker never joined) and/or the
+    # host kubeconfig still points at a previous cluster's IP, because the
+    # terraform run that writes it never got that far.
+    k8s_bad "k8s API unreachable (multipass VMs started? kubeconfig valid?)"
 fi
 
 hdr "SSH key for VM provisioning"
