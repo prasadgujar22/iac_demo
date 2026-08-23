@@ -87,8 +87,12 @@
       changed_when: false
       failed_when: false
 
+    # stdout AND stderr: this exporter prints its version banner on STDERR
+    # (node_exporter prints the same banner on stdout). Checking only stdout
+    # never matched, so every deploy re-downloaded a binary that was already
+    # installed and restarted a healthy exporter to replace it with itself.
     - name: Install the nginx exporter binary
-      when: nginx_exporter_version not in (nex_installed.stdout | default('')) 
+      when: nginx_exporter_version not in ((nex_installed.stdout | default('')) ~ (nex_installed.stderr | default(''))) 
       become: true
       block:
         - name: Download the nginx exporter release

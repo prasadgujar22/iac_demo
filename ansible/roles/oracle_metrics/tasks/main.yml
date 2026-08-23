@@ -75,6 +75,9 @@
     # The timer's first run is up to one interval away; force one now so the
     # verification below has something to read and a broken query fails HERE,
     # during the deploy, rather than silently 30 seconds later.
+    #
+    # Reports "changed" on every run, correctly: it really does run the
+    # collector each time. This is the one deliberate non-idempotency here.
     - name: Run the collector once immediately
       ansible.builtin.systemd:
         name: oracle_metrics.service

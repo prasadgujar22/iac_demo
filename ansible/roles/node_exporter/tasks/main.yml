@@ -59,8 +59,12 @@
 
     # Downloading 20MB on every run would make this role slow and noisy for no
     # reason; the version string is the only thing that decides a reinstall.
+    #
+    # Both streams are checked because the stream is not consistent between
+    # exporters: node_exporter prints its banner on stdout, the nginx exporter
+    # on stderr. Checking one only works by luck.
     - name: Install the node_exporter binary
-      when: node_exporter_version not in (ne_installed.stdout | default('')) 
+      when: node_exporter_version not in ((ne_installed.stdout | default('')) ~ (ne_installed.stderr | default(''))) 
       become: true
       block:
         - name: Download the node_exporter release
