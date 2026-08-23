@@ -39,8 +39,9 @@ Only the LAN entry point needs a bridge, because Multipass VMs are NAT'd.
 | `terraform/10-db-multipass/` | Terraform | VM that *hosts* the Oracle XE container |
 | `terraform/20-wls-k8s/` | Terraform | Namespace, secrets, Domain/Cluster CRs, NodePorts |
 | `terraform/30-nginx-multipass/` | Terraform | nginx proxy VM |
+| `terraform/40-obs-multipass/` | Terraform | Observability VM (Prometheus + Grafana) |
 | `ansible/` | Ansible | Oracle XE **container**, app build, socat bridges, nginx config |
-| `jenkins/` | Jenkins | Pipelines: full infra, app-only redeploy, teardown |
+| `jenkins/` | Jenkins | Pipelines: full infra, app-only redeploy, teardown, observability |
 | `app/customer-onboarding/` | Maven | The application, with the fixes described below |
 
 ## The database runs as a CONTAINER on a VM
@@ -288,6 +289,81 @@ The main nginx play in `site.yml` is deliberately **not** tagged `verify`;
 separate verify-tagged plays cover the verification path. Tagging the main play
 instead made the `Configure` stage's `--skip-tags verify` skip configuring nginx
 altogether — the play header printed with no tasks beneath it.
+
+## Observability
+
+Prometheus and Grafana, with dashboards for the proxy, the cluster and the
+database. Deployed and destroyed by `homelab-observability`
+(`ACTION=DEPLOY|DESTROY`), independently of everything else.
+
+### It runs on its own VM, not in the cluster
+
+`kube-prometheus-stack` wants 1.5–2.5 GB. When this was built `k8s-worker-1`
+sat at **91%** of its memory requests and `k8s-master` at 64%, with WebLogic
+already overcommitted on limits — and this repo has an OOM episode on record
+where the scheduler stacked `AdminServer` onto the small node and killed an
+in-flight WLST deploy. Monitoring must not be able to do that to the thing it
+monitors.
+
+It also needs to **outlive what it watches**: metrics matter most across a
+teardown and rebuild of the tiers below, which is why this is a separate stack
+that `homelab-teardown` does not touch, and why its teardown is one
+`terraform destroy`.
+
+Only the collectors run in-cluster — node-exporter as a DaemonSet and
+kube-state-metrics, roughly 130Mi together.
+
+### Database metrics without a database exporter
+
+There is no usable Oracle exporter for this host:
+
+- `iamseth/oracledb_exporter` publishes **amd64 only**, and amd64 under QEMU
+  user-mode emulation on Apple Silicon crashes the emulator — the same wall
+  that forced `oracle-xe` → `oracle-free`.
+- Oracle's own `observability-exporter` needs an authenticated pull with
+  license acceptance, which an unattended pipeline cannot do.
+
+So a systemd timer runs `sqlplus` **inside the existing arm64 database
+container** and writes a `.prom` file that node_exporter already serves. No new
+image, no new port, no architecture risk — and **no credentials**, because
+`sqlplus` authenticates as SYSDBA through the OS inside the container.
+
+`oracle_up` is written on every collection, deliberately: metrics that merely
+stop updating look identical to a healthy, idle database.
+
+### What is collected
+
+| Source | Where | What |
+|---|---|---|
+| node_exporter (systemd) | obs, oracle-db, nginx-proxy | CPU, memory, disk, network |
+| node_exporter (DaemonSet) | k8s nodes | the same, on the same port — a node is a node however its exporter arrived |
+| nginx-prometheus-exporter | nginx-proxy | connections by state, requests, **accepted − handled** (dropped) |
+| kube-state-metrics | cluster | deployments, pod phases, restart counts |
+| kubelet cAdvisor | cluster | per-container CPU and memory — what makes the WebLogic pods visible as pods |
+| sqlplus → textfile | oracle-db | sessions, tablespace headroom, SGA/PGA, application row count |
+
+Four dashboards — Fleet, nginx, Kubernetes, Oracle — are **vendored as JSON**
+rather than imported by grafana.com ID, so the deploy needs no internet at run
+time, the panels are reviewed alongside the code producing the metrics they
+read, and nothing changes underneath a rebuild.
+
+Every image and binary version is pinned and arm64-verified before use.
+
+### Verification is from the host, not the VM
+
+Each role proves its own endpoint answers locally, then the pipeline asserts
+from the Jenkins host that **no Prometheus target is down** and that Grafana
+provisioned **all four** dashboards. Both failures are otherwise silent:
+provisioning errors do not stop Grafana — it starts happily and serves nothing
+— and a bind-address mistake looks fine from localhost.
+
+Teardown removes the exporters from the tiers that survive *before* destroying
+the VM, so nothing is left listening on machines nothing scrapes.
+
+```bash
+make obs           # deploy (VM + exporters + Prometheus + Grafana)
+make obs-destroy   # remove exporters everywhere, then destroy the VM
+```
 
 ## Adopting existing hand-built infrastructure
 
