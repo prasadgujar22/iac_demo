@@ -488,7 +488,16 @@ set -euo pipefail
                         // ships in the domain image), so site.yml has no app play
                         // and nothing here to skip. DEPLOY_APP now gates the
                         // post-deployment wiring stage below instead.
-                        def skip = ''
+                        // Skip the verify play here: the dedicated 'Verify'
+                        // stage below is the single place verification runs.
+                        // Running it in both was harmless while every check was
+                        // read-only, but verify now KILLS a managed-server pod
+                        // to prove session failover -- and the second run then
+                        // started seconds later against a cluster still
+                        // recovering from the first one's kill, which is exactly
+                        // how build #39 failed ("all new sessions landed on one
+                        // server", 10/10 on ms2 while ms1 was still coming back).
+                        def skip = '--skip-tags verify'
                         sh """#!/bin/bash
 set -euo pipefail
                             cd ansible

@@ -2,6 +2,39 @@
 # End-to-end verification. Every assertion is a real HTTP interaction against
 # live infrastructure -- nothing is inferred from "the deploy command exited 0".
 
+- name: Wait for the domain to settle before asserting anything
+  # Verification usually runs moments after an apply that changed the image or
+  # the pod spec, and the operator rolls servers one at a time. Asserting
+  # against a domain mid-roll measures the roll, not the system: a restarting
+  # server is marked down by nginx, so every new session lands on its peer and
+  # the distribution check fails for a reason that has nothing to do with
+  # routing. Gate the whole role on the domain being settled, not just the
+  # destructive failover check at the end.
+  ansible.builtin.shell:
+    cmd: |
+      set -uo pipefail
+      NS="{{ wls_namespace }}"
+      D="{{ wls_domain_uid }}"
+      for i in $(seq 1 {{ verify_settle_attempts }}); do
+        ROLLING=$(kubectl -n "$NS" get domain "$D" \
+                  -o jsonpath='{.status.conditions[?(@.type=="Rolling")].status}' 2>/dev/null)
+        STATES=$(kubectl -n "$NS" get domain "$D" \
+                 -o jsonpath='{range .status.servers[*]}{.serverName}={.state} {end}' 2>/dev/null)
+        NOTREADY=$(echo "$STATES" | tr ' ' '\n' | grep -v '^$' | grep -vc '=RUNNING')
+        if [ "$ROLLING" != "True" ] && [ -n "$STATES" ] && [ "${NOTREADY:-1}" -eq 0 ]; then
+          echo "domain settled: $STATES"
+          exit 0
+        fi
+        if [ "$i" = "1" ]; then
+          echo "waiting for the domain to settle (rolling=${ROLLING:-none}): $STATES"
+        fi
+        sleep 10
+      done
+      echo "FAIL: domain did not settle: rolling=${ROLLING:-none} states=${STATES:-none}"
+      exit 1
+  register: settled
+  changed_when: false
+
 - name: Proxy health endpoint responds
   ansible.builtin.uri:
     url: "http://{{ proxy_lan_ip }}:{{ proxy_listen_port }}/proxy-health"
@@ -166,20 +199,6 @@
       J=$(mktemp)
       trap 'rm -f "$J"' EXIT
 
-      # 0. Never start while the operator is still rolling. Verify often runs
-      #    right after an apply that changed the image or serverPod env, and a
-      #    roll recreates these very pods -- killing one mid-roll makes the
-      #    replacement queue behind the operator's own restarts and blows the
-      #    readiness deadline below for reasons that have nothing to do with
-      #    session replication. (Observed exactly this in build #37.)
-      for i in $(seq 1 60); do
-        ROLLING=$(kubectl -n "$NS" get domain {{ wls_domain_uid }} \
-                  -o jsonpath='{.status.conditions[?(@.type=="Rolling")].status}' 2>/dev/null)
-        [ "$ROLLING" = "True" ] || break
-        [ "$i" = "1" ] && echo "domain is rolling; waiting for it to settle before the failover test"
-        sleep 10
-      done
-
       # 1. Establish a logged-in session through the proxy.
       curl -s -m 15 -c "$J" -o /dev/null "$BASE/login"
       curl -s -m 15 -b "$J" -c "$J" -o /dev/null -X POST \
@@ -307,6 +326,7 @@
       - "session affinity ..... {{ affinity.stdout_lines | last }}"
       - "distribution ......... {{ distribution.stdout_lines | last }}"
       - "write/read round trip  {{ roundtrip.stdout_lines | last }}"
+      - "domain settled ....... {{ settled.stdout_lines | last }}"
       - "session failover ..... {{ failover.stdout_lines | last if failover is not skipped else 'SKIPPED' }}"
       - ""
       - "APPLICATION URL: http://{{ proxy_lan_ip }}:{{ proxy_listen_port }}{{ app_context_root }}/login"
