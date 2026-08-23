@@ -21,8 +21,8 @@ single host; WebLogic runs on a Multipass-based Kubernetes cluster.
               └─────────────┬──────────────┘
                             │  jdbc:oracle:thin
               ┌─────────────▼──────────────┐
-              │  Oracle XE 21c / XEPDB1    │   Multipass VM
-              │  gvenzl/oracle-xe:21-slim  │   10.2.243.x
+              │  Oracle Free 23c / XEPDB1  │   Multipass VM
+              │  gvenzl/oracle-free:23-slim│   10.2.243.x
               │  CONTAINER on the VM :1521 │   (Docker)
               └────────────────────────────┘
 ```
@@ -52,7 +52,7 @@ VM**. There is no native Oracle install — `/opt/oracle/product` does not exist
 ```
 Multipass VM  oracle-db  10.2.243.x   Ubuntu 24.04
   └── Docker
-        └── container `oracle-xe`  gvenzl/oracle-xe:21-slim
+        └── container `oracle-xe`  gvenzl/oracle-free:23-slim
               ├── listener 1521  (published 0.0.0.0:1521 via docker-proxy)
               ├── PDB XEPDB1
               └── datafiles bind-mounted -> /opt/oracle-data on the VM
@@ -91,6 +91,18 @@ templates.
 
 The VM is still worth having: it puts the database on `10.2.243.0/24` alongside
 the k8s nodes, so WebLogic pods reach the listener directly.
+
+### `oracle-free`, not `oracle-xe`, on Apple Silicon
+
+`ansible/roles/oracle_xe` pulls **`gvenzl/oracle-free:23-slim`**. gvenzl
+publishes `oracle-xe` as **amd64 only**, and on an Apple Silicon host the
+Multipass VM is arm64: running amd64 XE under QEMU user-mode emulation crashes
+*the emulator* ("QEMU internal SIGSEGV"), not the database. That is a nested
+virtualization limit (macOS → arm64 VM → qemu-user → amd64), not something a
+retry fixes. `oracle-free` ships a native arm64 image under the same
+`APP_USER`/`APP_USER_PASSWORD` contract, so only the image and the PDB name
+change — `ORACLE_DATABASE=XEPDB1` keeps the PDB (and therefore the JDBC URL
+above) exactly as it was, instead of `oracle-free`'s own `FREEPDB1` default.
 
 ## Why every tier is on Multipass
 
@@ -137,6 +149,14 @@ reviewed and versioned together:
    owns the primary. `verify` proves this by killing that pod and re-using the
    same `JSESSIONID`.
 
+7. **Database settings come from the environment first.** `DatabaseConfig`
+   resolves each of url/user/password as **environment variable → system
+   property → `web.xml` context-param**. The WAR ships inside the domain image
+   and its `web.xml` is templated at build time, so the baked-in JDBC URL is
+   only a fallback now; the deployment supplies the current one. An *empty*
+   environment variable counts as unset, so a runtime that defines `DB_URL`
+   with no value cannot blank out a working fallback.
+
 The application is built and deployed by the `homelab-app` Jenkins pipeline
 (see below) — not by uploading a WAR through the WebLogic console by hand, as
 the vendored `app/customer-onboarding/README.md` describes for a standalone
@@ -163,16 +183,87 @@ in order:
    node. There is no registry here and pods pull with `imagePullPolicy:
    IfNotPresent`, so an image missing from one node is an `ErrImagePull` the
    moment a pod schedules there.
-4. `terraform apply -var domain_image=…` — changing `spec.image` is what makes
-   the operator roll the servers onto the new application, one at a time.
+4. `terraform apply -var domain_image=… -var db_url=…` — changing `spec.image`
+   is what makes the operator roll the servers onto the new application, one at
+   a time. `db_url` must be passed on the same apply (see below), or the pods
+   come back without it.
 
-**Consequence to know about:** `web.xml` is templated at *build* time, so the
-JDBC URL — including the database VM's IP — is fixed in the image. If that IP
-changes (Multipass addresses are pinned per VM but not reserved, so a recreate
-can move them), the image must be rebuilt. Running `homelab-app` does exactly
-that. Making the app read its JDBC settings from the environment, injected via
-the Domain's `serverPod.env`, would remove this coupling and is the obvious
-next improvement.
+### The database address is no longer frozen into the image
+
+`web.xml` is still templated at *build* time, so the JDBC URL inside the WAR is
+whatever the database VM's address was when the image was built — and Multipass
+pins addresses per VM without *reserving* them. A recreated database VM used to
+leave every existing image dialling the old address: `ORA-17820: The network
+adapter could not establish the connection`, against an otherwise healthy
+cluster.
+
+`terraform/20-wls-k8s` now injects **`DB_URL` into every server pod** through the
+domain's `spec.serverPod.env` (declared at domain level, so admin and cluster
+members alike inherit it), and the application prefers it over the baked-in
+context-param. The same image therefore works wherever the database currently
+lives, and the fallback is what keeps `DB_MODE=h2` — which has no database to
+point at — and plain non-container runs of the app working unchanged.
+
+Two things to know about the `db_url` variable:
+
+- **Every apply of this stack must pass it.** It defaults to empty (inject
+  nothing), so an apply that omits it strips `DB_URL` back out of the pods and
+  rolls the domain a second time. `jenkins/Jenkinsfile` and
+  `jenkins/Jenkinsfile.app` both read it from the db stack's own `jdbc_url`
+  output and skip it in `h2` mode. **`make infra` does not pass it** — prefer the
+  Jenkins jobs whenever a domain that needs `DB_URL` is in play.
+- **It is deliberately a `-var`, not a `terraform_remote_state` read** of the db
+  stack. A remote-state read would make *planning* this stack depend on the db
+  stack's state already existing — exactly the plan-time coupling that has
+  deadlocked from-scratch bootstraps in this pipeline before.
+
+Changing `db_url` rolls the domain, which is precisely how the new address
+reaches the running application.
+
+## Verification runs once, against a settled domain
+
+`ansible/roles/verify` asserts the stack end to end: proxy health, each managed
+server directly, the login page through the proxy, the dashboard, session
+affinity, session distribution, a write-then-read round trip through the
+database — and, since sessions became replicated, a **destructive** check that
+kills the pod owning a session and re-uses the same `JSESSIONID`.
+
+That destructive check is why the surrounding order matters. Each rule below
+exists because a build failed without it:
+
+- **Verification runs in exactly one place.** The pipeline's `Configure` stage
+  invokes `site.yml --skip-tags verify`; the dedicated `Verify` stage is the only
+  one that verifies. Running it in both was harmless while every check was
+  read-only, but the second run then started seconds after the first had killed a
+  pod, against a cluster still recovering — build #39 reported all 10 new
+  sessions on `ms2` while `ms1` was still coming back.
+- **It waits for the operator to finish rolling first**, via the
+  `domain_settled` role, gated on the Domain's **`Completed=True`** condition.
+  "`Rolling` isn't `True` and every server reads `RUNNING`" is *not* enough: the
+  operator restarts servers one at a time, so between two restarts every server
+  legitimately reports `RUNNING`. Build #41 passed straight through such a
+  window and templated the proxy 42s before the operator restarted `ms1`.
+- **nginx routing is re-templated both before and after verification.** nginx
+  pins sessions by JVM route id, and a restarted server comes back with a *new*
+  one. Capturing the map before the roll finishes records ids that are about to
+  be replaced (build #42: map written at 09:21:13, roll ran until 09:27:56,
+  distribution then collapsed onto one server). Refreshing only *afterwards* is
+  not enough either, because a failing run never reaches it — and refreshing
+  afterwards matters for real users, not just the next test: sessions carrying a
+  route id nginx no longer knows fall through to the balanced pool and land
+  anywhere.
+- **`nginx_proxy` resets `wls_routes` before discovery.** The role builds that
+  list by appending to itself, and now runs twice in one execution; without the
+  reset the template emits `upstream wls_ms1` twice, `nginx -t` rejects the
+  config, and the proxy silently stays on its previous one.
+- **The failover check polls for the replacement pod** rather than using
+  `kubectl wait`, which returns `NotFound` immediately (measured 0.04s) for a pod
+  that does not exist yet — indistinguishable from "the pod never came back".
+
+The main nginx play in `site.yml` is deliberately **not** tagged `verify`;
+separate verify-tagged plays cover the verification path. Tagging the main play
+instead made the `Configure` stage's `--skip-tags verify` skip configuring nginx
+altogether — the play header printed with no tasks beneath it.
 
 ## Adopting existing hand-built infrastructure
 
@@ -310,4 +401,4 @@ second pass — `make plan` proves it.
 - `oracle` (default) — Oracle XE as a **container on a Multipass VM**, shared across both managed servers
 - `h2` — embedded in-memory H2, per-pod dataset, no external dependency
 
-Set in `ansible/group_vars/all.yml` or override: `make app DB_MODE=h2`
+Set in `ansible/inventory/group_vars/all.yml` or override: `make app DB_MODE=h2`
