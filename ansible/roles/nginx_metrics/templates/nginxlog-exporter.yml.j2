@@ -9,19 +9,14 @@ namespaces:
     # Must match the log_format in wls-proxy.conf EXACTLY. Both come from
     # nginx_log_format in group_vars/all.yml precisely so they cannot drift:
     # a mismatch yields parse errors and no data, not an error anyone sees.
-    format: "{{ nginx_log_format }}"
+    format: {{ nginx_log_format | to_json }}
     source:
       files:
         - {{ nginxlog_access_log }}
     histogram_buckets: {{ nginxlog_buckets | to_json }}
-    # Relabels the request into a low-cardinality path label. Without this every
-    # distinct query string becomes its own series -- the classic way to make a
-    # small Prometheus fall over.
-    relabel_configs:
-      - target_label: path
-        from: request_uri
-        split: 1
-        matches:
-          - regexp: ^/customer-onboarding.*
-            replacement: /customer-onboarding
-        separator: ""
+    # No relabel_configs. The default label set is what this exporter derives
+    # from the format itself; a hand-written relabel rule here was a guess at a
+    # schema, and a guess that fails takes the whole exporter down rather than
+    # degrading. Check the emitted labels for anything high-cardinality (a
+    # per-URL label would be the thing to watch) and add rules deliberately if
+    # they turn out to be needed.
