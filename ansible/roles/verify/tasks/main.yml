@@ -208,14 +208,29 @@
 
       # 3. Identify which server owns the primary, reading each server's own
       #    route id exactly the way the nginx role discovers them.
-      OWNER=""; OPORT=""
+      #    Parse the cookie by FIELD, not with a regex searching the whole
+      #    string: JSESSIONID is <id>!<primary>!<secondary>, and a greedy
+      #    ".*JSESSIONID=[^;]*!\([-0-9]*\)" backtracks to the LAST '!' and
+      #    therefore returns the SECONDARY id. That silently identifies the
+      #    peer instead of the owner, so the test would kill the pod holding
+      #    the replica -- passing while proving something much weaker than it
+      #    claims -- or, when the ids line up differently, match nothing at all
+      #    ("no managed server claims route id", build #38).
+      OWNER=""; OPORT=""; PROBED=""
       for pair in $PAIRS; do
         n="${pair%%:*}"; p="${pair##*:}"
         RID=$(curl -s -i -m 15 "http://$NODE:$p{{ app_context_root }}/login" \
-              | tr -d '\r' | sed -n 's/.*JSESSIONID=[^;]*!\([-0-9]*\).*/\1/p' | head -1)
-        if [ "$RID" = "$PRIMARY" ]; then OWNER="$n"; OPORT="$p"; fi
+              | tr -d '\r' \
+              | sed -n 's/^[Ss]et-[Cc]ookie: JSESSIONID=\([^;]*\).*/\1/p' \
+              | head -1 | awk -F'!' '{print $2}')
+        PROBED="$PROBED $n=${RID:-none}"
+        if [ -n "$RID" ] && [ "$RID" = "$PRIMARY" ]; then OWNER="$n"; OPORT="$p"; fi
       done
-      if [ -z "$OWNER" ]; then echo "FAIL: no managed server claims route id $PRIMARY"; exit 1; fi
+      if [ -z "$OWNER" ]; then
+        echo "FAIL: no managed server claims route id $PRIMARY"
+        echo "      probed primaries:$PROBED"
+        exit 1
+      fi
       POD="{{ wls_domain_uid }}-$OWNER"
       echo "primary session owner: $OWNER (pod $POD)"
 
