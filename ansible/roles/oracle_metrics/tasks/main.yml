@@ -102,8 +102,11 @@
 
     - name: Report what was collected
       ansible.builtin.debug:
+        # splitlines(), not split('\n'): inside a folded scalar the escape is
+        # never processed, so split() looked for a literal backslash-n, found
+        # none, and reported an empty list against a file full of metrics.
         msg: >-
           Oracle metrics:
-          {{ (oracle_prom.content | b64decode).split('\n')
+          {{ (oracle_prom.content | b64decode).splitlines()
              | select('match', '^oracle_(up|sessions_total|app_rows_total)')
              | list | join(' | ') }}

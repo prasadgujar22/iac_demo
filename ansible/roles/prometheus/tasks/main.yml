@@ -118,6 +118,12 @@
       delay: 10
       until:
         - prom_targets is succeeded
+        # BOTH conditions matter. "no target is down" is trivially true of an
+        # empty list, and Prometheus reports no active targets at all for the
+        # first moments after it starts -- build #2 passed this check against
+        # 0 targets and reported "(0 targets, all up)", which is precisely the
+        # silently-empty success this role exists to prevent.
+        - (prom_targets.content | from_json).data.activeTargets | length > 0
         - (prom_targets.content | from_json).data.activeTargets
           | rejectattr('health', 'equalto', 'up') | list | length == 0
 

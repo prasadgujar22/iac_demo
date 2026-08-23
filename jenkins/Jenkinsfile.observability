@@ -166,6 +166,10 @@ print('TOTAL %d DOWN %d' % (len(t), len(bad)))
 ")
                     echo "$DOWN"
                     echo "$DOWN" | grep -q "DOWN 0$" || { echo "[verify] FAIL: some scrape targets are down" >&2; exit 1; }
+                    # A target count of zero also reports "DOWN 0". Assert that
+                    # Prometheus actually has targets, or an empty scrape config
+                    # would pass verification as cleanly as a healthy one.
+                    echo "$DOWN" | grep -qE "TOTAL [1-9][0-9]* " || { echo "[verify] FAIL: Prometheus has no active targets at all" >&2; exit 1; }
 
                     echo "[verify] Grafana health"
                     curl -sf "http://$IP:$GRAF/api/health" | grep -q '"database": *"ok"' || { echo "[verify] FAIL: Grafana unhealthy" >&2; exit 1; }
