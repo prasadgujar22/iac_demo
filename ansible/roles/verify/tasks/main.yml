@@ -166,6 +166,20 @@
       J=$(mktemp)
       trap 'rm -f "$J"' EXIT
 
+      # 0. Never start while the operator is still rolling. Verify often runs
+      #    right after an apply that changed the image or serverPod env, and a
+      #    roll recreates these very pods -- killing one mid-roll makes the
+      #    replacement queue behind the operator's own restarts and blows the
+      #    readiness deadline below for reasons that have nothing to do with
+      #    session replication. (Observed exactly this in build #37.)
+      for i in $(seq 1 60); do
+        ROLLING=$(kubectl -n "$NS" get domain {{ wls_domain_uid }} \
+                  -o jsonpath='{.status.conditions[?(@.type=="Rolling")].status}' 2>/dev/null)
+        [ "$ROLLING" = "True" ] || break
+        [ "$i" = "1" ] && echo "domain is rolling; waiting for it to settle before the failover test"
+        sleep 10
+      done
+
       # 1. Establish a logged-in session through the proxy.
       curl -s -m 15 -c "$J" -o /dev/null "$BASE/login"
       curl -s -m 15 -b "$J" -c "$J" -o /dev/null -X POST \
@@ -235,8 +249,23 @@
       # 6. The replacement pod must come back WITH the application. That is
       #    what baking the WAR into the image buys; a runtime-deployed app
       #    comes back empty here.
-      kubectl -n "$NS" wait --for=condition=Ready "pod/$POD" --timeout=300s >/dev/null 2>&1 || {
-        echo "FAIL: $POD did not become Ready again"; exit 1; }
+      # `kubectl wait` is wrong here: between the delete and the operator
+      # recreating the pod there is a window where the object does not exist,
+      # and `kubectl wait` does not wait for it to appear -- it returns
+      # "Error from server (NotFound)" immediately (measured: 0.04s), which
+      # reads as "the pod never came back". Poll instead, tolerating NotFound.
+      BACK=0
+      for i in $(seq 1 60); do
+        R=$(kubectl -n "$NS" get pod "$POD" \
+            -o jsonpath='{.status.containerStatuses[0].ready}' 2>/dev/null)
+        if [ "$R" = "true" ]; then BACK=1; break; fi
+        sleep 5
+      done
+      if [ "$BACK" -ne 1 ]; then
+        echo "FAIL: $POD did not become Ready again within 300s"
+        kubectl -n "$NS" get pod "$POD" -o wide 2>&1 | tail -2
+        exit 1
+      fi
       RC=""
       for i in $(seq 1 20); do
         RC=$(curl -s -o /dev/null -m 15 -w '%{http_code}' "http://$NODE:$OPORT{{ app_context_root }}/login")

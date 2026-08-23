@@ -46,6 +46,29 @@ variable "domain_image" {
   default = "wls-domain-image:9.1"
 }
 
+variable "db_url" {
+  description = <<-EOT
+    JDBC URL injected into every server pod as the DB_URL environment variable.
+
+    The application prefers this over the dbUrl context-param baked into its
+    web.xml at build time (see DatabaseConfig). That matters because the WAR
+    ships inside the domain image: without this, the database host is frozen at
+    image-build time, and a database VM that comes back on a different address
+    (Multipass pins addresses per VM but does not reserve them) leaves the image
+    dialling the old one -- ORA-17820 at runtime, with a perfectly healthy
+    cluster.
+
+    Empty (the default) injects nothing at all, leaving the application on its
+    web.xml fallback. That is the correct behaviour for DB_MODE=h2, which has
+    no database to point at, and it keeps a bare `terraform apply` working.
+
+    Changing this rolls the domain: the operator restarts pods when serverPod
+    env changes, which is exactly how the new address reaches the application.
+  EOT
+  type        = string
+  default     = ""
+}
+
 variable "cluster_name" {
   description = "WebLogic cluster name as defined in the WDT model."
   type        = string

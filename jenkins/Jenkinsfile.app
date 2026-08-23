@@ -136,8 +136,17 @@ set -euo pipefail
                 sh """#!/bin/bash
 set -euo pipefail
                     terraform -chdir=terraform/20-wls-k8s init -reconfigure -no-color -input=false
+                    # db_url must be passed on EVERY apply of this stack: it
+                    # defaults to empty, so omitting it here would strip DB_URL
+                    # back out of the pods and roll the domain a second time.
+                    DB_URL=""
+                    if [ "\${DB_MODE}" = "oracle" ]; then
+                        terraform -chdir=terraform/10-db-multipass init -reconfigure -no-color -input=false >/dev/null 2>&1 || true
+                        DB_URL=\$(terraform -chdir=terraform/10-db-multipass output -raw jdbc_url 2>/dev/null || true)
+                    fi
                     terraform -chdir=terraform/20-wls-k8s apply -no-color -auto-approve \\
-                      -var "domain_image=${env.DOMAIN_IMAGE}"
+                      -var "domain_image=${env.DOMAIN_IMAGE}" \\
+                      -var "db_url=\${DB_URL}"
                 """
             }
         }

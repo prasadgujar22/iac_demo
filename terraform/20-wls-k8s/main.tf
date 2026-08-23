@@ -183,6 +183,21 @@ resource "kubernetes_manifest" "domain" {
       httpAccessLogInLogHome   = true
       replicas                 = var.replicas
 
+      # Domain-level serverPod settings are inherited by EVERY server (admin and
+      # cluster members alike), so one declaration covers the whole domain.
+      #
+      # Conditional on db_url being set: an empty env var would override the
+      # application's web.xml fallback with nothing, which is worse than not
+      # injecting at all. h2 mode relies on that fallback.
+      serverPod = {
+        env = var.db_url == "" ? [] : [
+          {
+            name  = "DB_URL"
+            value = var.db_url
+          },
+        ]
+      }
+
       adminServer = {
         # When true, the operator's readiness/liveness probes hard-require a
         # dedicated SSL "administration channel" on port 9002. WebLogic

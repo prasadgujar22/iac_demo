@@ -398,7 +398,36 @@ set -euo pipefail
                         // this run actually built one (see 'Build domain
                         // image' above) -- otherwise fall through to
                         // variables.tf's own default unchanged.
-                        def varArgs = (s == '20-wls-k8s' && env.DOMAIN_IMAGE) ? "-var \"domain_image=${env.DOMAIN_IMAGE}\"" : ''
+                        def varArgs = ''
+                        if (s == '20-wls-k8s') {
+                            if (env.DOMAIN_IMAGE) {
+                                varArgs += " -var \"domain_image=${env.DOMAIN_IMAGE}\""
+                            }
+                            // db_url is injected into every server pod so the
+                            // application reads the CURRENT database address
+                            // instead of the one templated into its web.xml when
+                            // the image was built. Read it from the db stack's
+                            // own output, tolerating that stack never having
+                            // been applied (empty -> nothing injected -> the
+                            // application keeps its web.xml fallback).
+                            //
+                            // Deliberately NOT a terraform_remote_state data
+                            // source: that would make PLANNING this stack depend
+                            // on the db stack's state already existing, which is
+                            // exactly the plan-time coupling that has deadlocked
+                            // from-scratch bootstraps in this pipeline before.
+                            if (params.DB_MODE == 'oracle') {
+                                def dbUrl = sh(
+                                    script: "terraform -chdir=terraform/10-db-multipass init -reconfigure -no-color -input=false >/dev/null 2>&1 || true; terraform -chdir=terraform/10-db-multipass output -raw jdbc_url 2>/dev/null || true",
+                                    returnStdout: true).trim()
+                                if (dbUrl) {
+                                    echo "[plan] injecting DB_URL=${dbUrl}"
+                                    varArgs += " -var \"db_url=${dbUrl}\""
+                                } else {
+                                    echo "[plan] db stack has no jdbc_url yet -- application will use its web.xml fallback"
+                                }
+                            }
+                        }
                         sh """#!/bin/bash
 set -euo pipefail
                             # -reconfigure: the workspace may hold a stale local state file from a
