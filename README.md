@@ -121,6 +121,30 @@ Multipass restores its own instances after a reboot and puts every tier on one
 subnet. Removing the four snaps (lxd, microceph, microovn, microcloud) reclaimed
 **21 GB** and removed a whole class of boot-time failure.
 
+### The multipass client can hang long after the work is finished
+
+`multipass exec` has been seen spinning at 100% CPU forever *after* the remote
+command already completed — build #44 lost 20 minutes that way on a `kubeadm
+init` that had finished in about 90 seconds, because a Terraform `local-exec`
+provisioner has no timeout of its own and the stack has no way to know the
+difference between "still working" and "wedged".
+
+`terraform/05-k8s-multipass` therefore runs every long multipass call through
+`mp_wait`, which bounds it and reports **124** for a genuine timeout kill and
+**125** for a client killed early because the work was already done. The early
+kill is driven by `MP_DONE_CHECK`, a probe polled while the client is alive.
+
+The probe has to prove the remote command **exited**, not that its work looks
+finished: killing the client closes the channel and can `SIGHUP` a command
+still running. So `kubeadm init` and `kubeadm join` each record their own exit
+code to `/run/kubeadm-{init,join}.rc` as the last thing the remote shell does,
+and that sentinel is what the probe looks for. It also carries the real result
+— `admin.conf` is written in an early kubeadm phase, so its mere presence was
+never proof the run succeeded.
+
+`/run` is tmpfs, so a reboot clears the sentinels; the `admin.conf` /
+`kubelet.conf` checks remain as the fallback for that case.
+
 ## Application fixes and features carried in this repo
 
 `app/customer-onboarding/` is the upstream demo with these changes on top,
@@ -363,6 +387,26 @@ the system `jenkins` user, that's `/home/jenkins/tfstate/`; this checkout runs
 Jenkins as `prasad_mac` on macOS, so the `backend.tf` files here point at
 `/Users/prasad_mac/.homelab-iac/tfstate/` instead — match the path to whatever
 user Jenkins actually runs as on your host.
+
+### Builds run unattended
+
+`homelab-iac` takes **`AUTO_APPROVE` (default true)**, and both *Approve apply*
+stages are skipped when it is set. Starting a build already means choosing
+`APPLY`, `DB_MODE`, `BUILD_IMAGE` and `DEPLOY_APP` — the prompts only re-asked
+what was just selected, and each carried a 15-minute timeout, so a build nobody
+was watching could abort with the k8s tier applied and nothing after it.
+
+Uncheck `AUTO_APPROVE` to get the plan-by-plan review back.
+
+`Jenkinsfile.teardown` deliberately keeps its prompt: it guards `terraform
+destroy`, where launch parameters are not a sufficient statement of intent.
+That job has its own `AUTO_APPROVE`, scoped to the non-destructive `SHUTDOWN`
+path, and `CONFIRM=DESTROY` for the rest.
+
+> Jenkins **drops a parameter its stored job config does not know yet**, so a
+> newly added one is absent from the first build after it appears — the job
+> learns parameters from the `Jenkinsfile` only once it has run with them. The
+> `parameters {}` default still applies during that run.
 
 ### Jenkins credentials the pipelines expect
 
