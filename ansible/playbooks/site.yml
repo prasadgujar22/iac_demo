@@ -148,14 +148,25 @@
 - name: Configure the nginx reverse proxy
   hosts: nginx
   gather_facts: true
-  # Also tagged verify: `--tags verify` (how the pipeline's Verify stage runs
-  # this playbook) would otherwise skip this play and assert against whatever
-  # route-id map was written last. Any JVM restart since then -- a rolling
-  # update, or verification's own failover check -- gives that server a new
-  # route id, so the map is stale and sessions on it fall through to the
-  # balanced pool. That surfaces as "all new sessions landed on one server",
-  # which looks like a load-balancing bug and is really a stale map.
-  tags: [proxy, nginx, verify]
+  # Deliberately NOT tagged verify. Adding that tag looked like a tidy way to
+  # make `--tags verify` refresh routing, but it also made the Configure
+  # stage's `--skip-tags verify` skip configuring nginx altogether -- the play
+  # header printed with no tasks beneath it. The dedicated play below covers
+  # the verify path instead.
+  tags: [proxy, nginx]
+  roles:
+    - nginx_proxy
+
+- name: Refresh nginx routing before verification
+  # Verification asserts on route-id affinity, so the map must describe the
+  # JVMs running right now. `--tags verify` (how the Verify stage invokes this
+  # playbook) skips the play above, and any JVM restart since it last ran -- a
+  # rolling update, or a previous run's failover check -- leaves that server's
+  # id stale. Its sessions then fall through to the balanced pool and
+  # distribution collapses onto one server.
+  hosts: nginx
+  gather_facts: true
+  tags: [verify]
   roles:
     - nginx_proxy
 
