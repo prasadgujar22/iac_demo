@@ -157,6 +157,18 @@
   roles:
     - nginx_proxy
 
+- name: Wait for the domain to settle before reading routing
+  # MUST come before the routing refresh below. nginx pins sessions by JVM
+  # route id, and the operator restarts servers one at a time, so a map
+  # captured mid-roll records ids that are about to be replaced. Build #42
+  # failed exactly that way: routing captured at 09:21:13, roll still running
+  # until 09:27:56, distribution then collapsed onto one server.
+  hosts: control
+  gather_facts: false
+  tags: [verify]
+  roles:
+    - domain_settled
+
 - name: Refresh nginx routing before verification
   # Verification asserts on route-id affinity, so the map must describe the
   # JVMs running right now. `--tags verify` (how the Verify stage invokes this

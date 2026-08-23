@@ -1,0 +1,5 @@
+---
+# 90 x 10s = 15 minutes. The operator restarts servers one at a time, so a full
+# rolling restart of this domain takes several minutes (build #42: 6m43s); the
+# wait must comfortably outlast it rather than measure it.
+verify_settle_attempts: 90

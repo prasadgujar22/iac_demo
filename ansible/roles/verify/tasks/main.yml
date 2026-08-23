@@ -3,48 +3,11 @@
 # live infrastructure -- nothing is inferred from "the deploy command exited 0".
 
 - name: Wait for the domain to settle before asserting anything
-  # Verification usually runs moments after an apply that changed the image or
-  # the pod spec, and the operator rolls servers one at a time. Asserting
-  # against a domain mid-roll measures the roll, not the system: a restarting
-  # server is marked down by nginx, so every new session lands on its peer and
-  # the distribution check fails for a reason that has nothing to do with
-  # routing. Gate the whole role on the domain being settled, not just the
-  # destructive failover check at the end.
-  ansible.builtin.shell:
-    cmd: |
-      set -uo pipefail
-      NS="{{ wls_namespace }}"
-      D="{{ wls_domain_uid }}"
-      for i in $(seq 1 {{ verify_settle_attempts }}); do
-        ROLLING=$(kubectl -n "$NS" get domain "$D" \
-                  -o jsonpath='{.status.conditions[?(@.type=="Rolling")].status}' 2>/dev/null)
-        COMPLETED=$(kubectl -n "$NS" get domain "$D" \
-                    -o jsonpath='{.status.conditions[?(@.type=="Completed")].status}' 2>/dev/null)
-        STATES=$(kubectl -n "$NS" get domain "$D" \
-                 -o jsonpath='{range .status.servers[*]}{.serverName}={.state} {end}' 2>/dev/null)
-        NOTREADY=$(echo "$STATES" | tr ' ' '\n' | grep -v '^$' | grep -vc '=RUNNING')
-        # Completed=True is the load-bearing condition, not "Rolling isn't True
-        # and everything reads RUNNING". The operator restarts servers ONE AT A
-        # TIME, so between two restarts every server legitimately reports
-        # RUNNING while the roll is still in progress -- a false "settled".
-        # Build #41 passed through exactly such a window: verification ran and
-        # templated the proxy at 08:37:45Z, and the operator then restarted ms1
-        # at 08:38:27Z, leaving that server's route id stale in the map.
-        # Completed only goes True once the whole roll has finished.
-        if [ "$COMPLETED" = "True" ] && [ "$ROLLING" != "True" ] \
-           && [ -n "$STATES" ] && [ "${NOTREADY:-1}" -eq 0 ]; then
-          echo "domain settled: $STATES"
-          exit 0
-        fi
-        if [ "$i" = "1" ]; then
-          echo "waiting for the domain to settle (completed=${COMPLETED:-none} rolling=${ROLLING:-none}): $STATES"
-        fi
-        sleep 10
-      done
-      echo "FAIL: domain did not settle: completed=${COMPLETED:-none} rolling=${ROLLING:-none} states=${STATES:-none}"
-      exit 1
-  register: settled
-  changed_when: false
+  # Defence in depth: the playbooks run this role before capturing routing, so
+  # by here it is normally a no-op that returns immediately. It stays so the
+  # verify role is still safe if invoked on its own.
+  ansible.builtin.include_role:
+    name: domain_settled
 
 - name: Proxy health endpoint responds
   ansible.builtin.uri:

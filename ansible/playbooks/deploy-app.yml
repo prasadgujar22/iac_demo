@@ -125,6 +125,18 @@
         proxy_lan_ip: "{{ hostvars['localhost']['resolved_proxy_ip'] }}"
       when: hostvars['localhost']['resolved_proxy_ip'] | default('') | length > 0
 
+- name: Wait for the domain to settle before reading routing
+  # MUST come before the routing refresh below. nginx pins sessions by JVM
+  # route id, and the operator restarts servers one at a time, so a map
+  # captured mid-roll records ids that are about to be replaced. Build #42
+  # failed exactly that way: routing captured at 09:21:13, roll still running
+  # until 09:27:56, distribution then collapsed onto one server.
+  hosts: control
+  gather_facts: false
+  tags: [verify]
+  roles:
+    - domain_settled
+
 - name: Refresh nginx routing
   # Route IDs change whenever a JVM restarts -- a domain rebuild, a rolling
   # update, or verification's own failover check -- so the proxy must be

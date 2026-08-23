@@ -2,7 +2,3 @@
 # 10 iterations reliably exposed a 4-in-10 affinity failure; fewer can pass by luck.
 verify_affinity_iterations: 10
 verify_distribution_iterations: 10
-# 90 x 10s = 15 minutes: a full rolling restart of the domain (servers restart
-# one at a time by design) comfortably fits, so verification waits it out
-# instead of measuring it.
-verify_settle_attempts: 90
