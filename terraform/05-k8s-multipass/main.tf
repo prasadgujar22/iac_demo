@@ -40,10 +40,54 @@ locals {
     })
   }
 
-  # Shared shell helper, inlined into every provisioner command: multipass
+  # Shared shell helpers, inlined into every provisioner command: multipass
   # requires client auth (local.passphrase set); root bypasses it and CI has
   # passwordless sudo, so fall back to sudo for any non-owner caller.
-  mp_helper = "mp() { if multipass \"$@\" 2>/dev/null; then return 0; else sudo -n multipass \"$@\"; fi; }"
+  #
+  # mp_wait bounds a call that can hang: multipass 1.16.3's client has been
+  # seen spinning at 100% CPU forever after the remote command already
+  # finished (`exec ... kubeadm init` -- control plane fully up on the VM,
+  # client never returned), which wedges the whole pipeline because a
+  # local-exec provisioner has no timeout of its own. Returns 124 on a
+  # watchdog kill, mirroring GNU timeout (not shipped on macOS, and not
+  # installed here), so callers can tell "client hung" from "command really
+  # failed" and re-check the VM's actual state before giving up.
+  #
+  # Output is staged through temp files instead of the inherited pipe so a
+  # killed client that somehow outlives us can never hold Terraform's
+  # provisioner pipe open; stdout and stderr stay separate so callers keep
+  # their usual redirection semantics.
+  mp_helper = <<-EOT
+    mp() { if multipass "$@" 2>/dev/null; then return 0; else sudo -n multipass "$@"; fi; }
+
+    mp_wait() {
+      local secs="$1"; shift
+      local out err pid rc waited
+      out="$(mktemp -t mp_wait_out)"
+      err="$(mktemp -t mp_wait_err)"
+      mp "$@" >"$out" 2>"$err" &
+      pid=$!
+      waited=0
+      rc=0
+      while kill -0 "$pid" 2>/dev/null; do
+        if [ "$waited" -ge "$secs" ]; then
+          pkill -P "$pid" 2>/dev/null || true
+          kill "$pid" 2>/dev/null || true
+          sleep 2
+          pkill -9 -P "$pid" 2>/dev/null || true
+          kill -9 "$pid" 2>/dev/null || true
+          wait "$pid" 2>/dev/null || true
+          cat "$out"; cat "$err" >&2; rm -f "$out" "$err"
+          return 124
+        fi
+        sleep 2
+        waited=$((waited + 2))
+      done
+      wait "$pid" || rc=$?
+      cat "$out"; cat "$err" >&2; rm -f "$out" "$err"
+      return "$rc"
+    }
+  EOT
 }
 
 resource "terraform_data" "ssh_key_precondition" {
@@ -230,14 +274,26 @@ resource "null_resource" "kubeadm_init" {
       ${local.mp_helper}
       MASTER_IP="${data.external.master_vm_ip.result.ip}"
 
-      if mp exec "${var.master_name}" -- test -f /etc/kubernetes/admin.conf >/dev/null 2>&1; then
+      if mp_wait 60 exec "${var.master_name}" -- test -f /etc/kubernetes/admin.conf >/dev/null 2>&1; then
         echo "[k8s] control plane already initialised on ${var.master_name}"
       else
         echo "[k8s] running kubeadm init on ${var.master_name} ($MASTER_IP)"
-        mp exec "${var.master_name}" -- sudo kubeadm init \
+        RC=0
+        mp_wait "${var.kubeadm_timeout}" exec "${var.master_name}" -- sudo kubeadm init \
           --pod-network-cidr="${var.pod_cidr}" \
           --apiserver-advertise-address="$MASTER_IP" \
-          --node-name="${var.master_name}"
+          --node-name="${var.master_name}" || RC=$?
+        if [ "$RC" -ne 0 ]; then
+          # A non-zero client exit does NOT mean kubeadm failed -- when the
+          # multipass client hangs (see mp_wait) the control plane is already
+          # up and the watchdog just killed a stuck client. Ask the VM.
+          if mp_wait 60 exec "${var.master_name}" -- test -f /etc/kubernetes/admin.conf >/dev/null 2>&1; then
+            echo "[k8s] WARN: multipass exec returned $RC (124 = watchdog kill), but /etc/kubernetes/admin.conf exists — control plane is up, continuing"
+          else
+            echo "[k8s] ERROR: kubeadm init failed (exit $RC) and ${var.master_name} has no /etc/kubernetes/admin.conf" >&2
+            exit 1
+          fi
+        fi
         mp exec "${var.master_name}" -- bash -c '
           mkdir -p "$HOME/.kube"
           sudo cp /etc/kubernetes/admin.conf "$HOME/.kube/config"
@@ -246,12 +302,23 @@ resource "null_resource" "kubeadm_init" {
       fi
 
       echo "[k8s] applying Flannel CNI"
-      mp exec "${var.master_name}" -- sudo kubectl --kubeconfig /etc/kubernetes/admin.conf \
-        apply -f https://github.com/flannel-io/flannel/releases/latest/download/kube-flannel.yml
+      RC=1
+      for attempt in 1 2 3; do
+        RC=0
+        mp_wait 300 exec "${var.master_name}" -- sudo kubectl --kubeconfig /etc/kubernetes/admin.conf \
+          apply -f https://github.com/flannel-io/flannel/releases/latest/download/kube-flannel.yml || RC=$?
+        if [ "$RC" -eq 0 ]; then break; fi
+        echo "[k8s] Flannel apply attempt $attempt returned $RC — retrying (apply is idempotent)"
+        sleep 10
+      done
+      if [ "$RC" -ne 0 ]; then
+        echo "[k8s] ERROR: Flannel apply failed after 3 attempts (exit $RC)" >&2
+        exit 1
+      fi
 
       echo "[k8s] waiting for control-plane node Ready"
       for i in $(seq 1 ${floor(var.kubeadm_timeout / 5)}); do
-        READY=$(mp exec "${var.master_name}" -- sudo kubectl --kubeconfig /etc/kubernetes/admin.conf \
+        READY=$(mp_wait 60 exec "${var.master_name}" -- sudo kubectl --kubeconfig /etc/kubernetes/admin.conf \
           get node "${var.master_name}" -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || echo "")
         if [ "$READY" = "True" ]; then
           echo "[k8s] ${var.master_name} Ready"
@@ -291,13 +358,24 @@ resource "null_resource" "kubeadm_join" {
     command     = <<-EOT
       set -euo pipefail
       ${local.mp_helper}
-      if mp exec "${each.key}" -- test -f /etc/kubernetes/kubelet.conf >/dev/null 2>&1; then
+      if mp_wait 60 exec "${each.key}" -- test -f /etc/kubernetes/kubelet.conf >/dev/null 2>&1; then
         echo "[k8s] ${each.key} already joined"
       else
         echo "[k8s] fetching join command from ${var.master_name}"
-        JOIN_CMD=$(mp exec "${var.master_name}" -- sudo kubeadm token create --print-join-command)
+        JOIN_CMD=$(mp_wait 300 exec "${var.master_name}" -- sudo kubeadm token create --print-join-command)
         echo "[k8s] joining ${each.key}"
-        mp exec "${each.key}" -- sudo bash -c "$JOIN_CMD"
+        RC=0
+        mp_wait "${var.kubeadm_timeout}" exec "${each.key}" -- sudo bash -c "$JOIN_CMD" || RC=$?
+        if [ "$RC" -ne 0 ]; then
+          # Same client-hang caveat as kubeadm init above: a joined worker
+          # writes /etc/kubernetes/kubelet.conf, so let the VM decide.
+          if mp_wait 60 exec "${each.key}" -- test -f /etc/kubernetes/kubelet.conf >/dev/null 2>&1; then
+            echo "[k8s] WARN: multipass exec returned $RC (124 = watchdog kill), but ${each.key} has /etc/kubernetes/kubelet.conf — joined, continuing"
+          else
+            echo "[k8s] ERROR: kubeadm join failed on ${each.key} (exit $RC)" >&2
+            exit 1
+          fi
+        fi
       fi
     EOT
   }

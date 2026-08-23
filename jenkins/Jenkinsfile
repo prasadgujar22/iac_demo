@@ -293,6 +293,13 @@ set -euo pipefail
 
         stage('Apply k8s tier') {
             when { expression { params.APPLY } }
+            // Bounded independently of the 90-minute pipeline timeout: a
+            // from-scratch bootstrap here is two cold VM launches plus a
+            // kubeadm init/join, and a stall used to sit undetected until
+            // the whole pipeline timed out. Terraform's own provisioners are
+            // watchdogged too (see mp_wait in 05-k8s-multipass/main.tf);
+            // this is the outer backstop.
+            options { timeout(time: 45, unit: 'MINUTES') }
             steps {
                 sh 'terraform -chdir=terraform/05-k8s-multipass apply -no-color tfplan'
             }
