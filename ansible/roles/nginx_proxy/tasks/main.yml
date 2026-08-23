@@ -6,6 +6,18 @@
 # managed server is renamed or the domain is rebuilt. Hardcoding them causes
 # logins to silently bounce back to the login page after the next rebuild.
 
+- name: Reset the discovered route table
+  # wls_routes is built by APPENDING to itself below, so it must start empty.
+  # Without this the role is not safe to run twice in one playbook execution:
+  # the fact survives between plays, the second run appends to the first run's
+  # list, and the template then emits `upstream wls_ms1` twice --
+  #   nginx: [emerg] duplicate upstream "wls_ms1"
+  # which fails `nginx -t` and leaves the proxy on its previous config. This
+  # became reachable once verification started re-templating the proxy both
+  # before and after its destructive failover check.
+  ansible.builtin.set_fact:
+    wls_routes: []
+
 - name: Discover the JVM route ID of each managed server
   # WebLogic embeds the owning server's JVM ID in the session cookie:
   #   JSESSIONID=<sessionid>!<primaryJVMID>[!<secondaryJVMID>]

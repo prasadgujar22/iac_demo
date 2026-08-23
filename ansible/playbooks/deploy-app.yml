@@ -107,6 +107,12 @@
 - name: Resolve environment networking overrides (no physical LAN on this host)
   hosts: control:nginx
   gather_facts: false
+  # tags: always, matching site.yml. Without it, `--tags verify` skips this
+  # play and every check then runs against the stale group_vars defaults --
+  # the original Linux homelab's 192.168.29.x LAN, which does not exist on
+  # this host. That fails as a connection timeout to 192.168.29.200, looking
+  # like the proxy is down rather than like a tag-selection problem.
+  tags: [always]
   tasks:
     - name: Point k8s_node_ip/k8s_master_ip at the real Multipass master IP
       ansible.builtin.set_fact:
@@ -120,10 +126,13 @@
       when: hostvars['localhost']['resolved_proxy_ip'] | default('') | length > 0
 
 - name: Refresh nginx routing
-  # Route IDs change after a domain rebuild, so the proxy must be re-templated
-  # whenever the application or domain is redeployed.
+  # Route IDs change whenever a JVM restarts -- a domain rebuild, a rolling
+  # update, or verification's own failover check -- so the proxy must be
+  # re-templated before anything asserts against its routing. Tagged verify so
+  # `--tags verify` cannot skip it and assert against a stale map.
   hosts: nginx
   gather_facts: true
+  tags: [verify, proxy, nginx]
   roles:
     - nginx_proxy
 
@@ -133,3 +142,21 @@
   tags: [verify]
   roles:
     - verify
+
+- name: Refresh nginx routing after verification
+  # Verification deliberately kills a managed-server pod to prove session
+  # failover, and the replacement JVM comes back with a NEW route id. nginx
+  # pins sessions by route id, so leaving the map as it was silently breaks
+  # affinity for that server -- for real users, not just for the next test
+  # run: their sessions carry an id nginx no longer recognises, fall through
+  # to the balanced pool, and land anywhere. Re-template the proxy against the
+  # route ids that actually exist now.
+  #
+  # Tagged verify as well as proxy so it runs whenever verification runs,
+  # including `--tags verify`, which is how the pipeline's Verify stage
+  # invokes this playbook.
+  hosts: nginx
+  gather_facts: true
+  tags: [verify, proxy, nginx]
+  roles:
+    - nginx_proxy

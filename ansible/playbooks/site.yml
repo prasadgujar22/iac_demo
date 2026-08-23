@@ -146,9 +146,14 @@
       when: primary_ip in (ansible_facts['all_ipv4_addresses'] | default([]))
 
 - name: Configure the nginx reverse proxy
-  hosts: nginx
-  gather_facts: true
-  tags: [proxy, nginx]
+  # Also tagged verify: `--tags verify` (how the pipeline's Verify stage runs
+  # this playbook) would otherwise skip this play and assert against whatever
+  # route-id map was written last. Any JVM restart since then -- a rolling
+  # update, or verification's own failover check -- gives that server a new
+  # route id, so the map is stale and sessions on it fall through to the
+  # balanced pool. That surfaces as "all new sessions landed on one server",
+  # which looks like a load-balancing bug and is really a stale map.
+  tags: [proxy, nginx, verify]
   roles:
     - nginx_proxy
 
@@ -158,3 +163,21 @@
   tags: [verify]
   roles:
     - verify
+
+- name: Refresh nginx routing after verification
+  # Verification deliberately kills a managed-server pod to prove session
+  # failover, and the replacement JVM comes back with a NEW route id. nginx
+  # pins sessions by route id, so leaving the map as it was silently breaks
+  # affinity for that server -- for real users, not just for the next test
+  # run: their sessions carry an id nginx no longer recognises, fall through
+  # to the balanced pool, and land anywhere. Re-template the proxy against the
+  # route ids that actually exist now.
+  #
+  # Tagged verify as well as proxy so it runs whenever verification runs,
+  # including `--tags verify`, which is how the pipeline's Verify stage
+  # invokes this playbook.
+  hosts: nginx
+  gather_facts: true
+  tags: [verify, proxy, nginx]
+  roles:
+    - nginx_proxy
