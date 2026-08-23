@@ -1,6 +1,11 @@
 ---
-# Application-only redeploy: rebuild the WAR, redeploy, refresh nginx routing and
-# re-verify. Does not touch provisioning. This is the fast inner loop.
+# Post-deployment wiring: refresh nginx routing and re-verify the running app.
+#
+# This no longer builds or deploys the application. The WAR ships inside the
+# domain image (see packer/wls-domain-image and playbooks/build-app.yml), so
+# rolling out an app change is: build-app.yml -> packer build -> terraform
+# apply with the new image tag. What remains here is what must happen AFTER
+# the domain is running the new image.
 - name: Load database facts
   hosts: localhost
   connection: local
@@ -114,14 +119,6 @@
         proxy_lan_ip: "{{ hostvars['localhost']['resolved_proxy_ip'] }}"
       when: hostvars['localhost']['resolved_proxy_ip'] | default('') | length > 0
 
-- name: Build and deploy the application
-  hosts: control
-  gather_facts: false
-  vars:
-    oracle_db_host: "{{ hostvars['localhost']['oracle_db_host'] | default('') }}"
-  roles:
-    - app_deploy
-
 - name: Refresh nginx routing
   # Route IDs change after a domain rebuild, so the proxy must be re-templated
   # whenever the application or domain is redeployed.
@@ -133,5 +130,6 @@
 - name: Verify
   hosts: control
   gather_facts: false
+  tags: [verify]
   roles:
     - verify

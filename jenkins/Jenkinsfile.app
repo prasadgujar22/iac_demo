@@ -1,8 +1,20 @@
 // ============================================================================
-// Application-only redeploy — the fast inner loop.
+// Application-only redeploy.
 //
-// Rebuilds the WAR, redeploys to the existing WebLogic cluster, refreshes nginx
-// routing and re-verifies. Touches no provisioning, so it is safe to run often.
+// Rebuilds the WAR, bakes it into a new domain image, rolls the running domain
+// onto that image, then refreshes nginx routing and re-verifies. Provisioning
+// (VMs, cluster, database) is untouched.
+//
+// Why an image build rather than a WLST deploy: the domain is Model-in-Image,
+// so every pod regenerates $DOMAIN_HOME from the WDT model on each start. An
+// application deployed at runtime lives only in that ephemeral domain home, so
+// any pod restart silently brought the pod back with no application. The WAR
+// is therefore part of the image (appDeployments in the model), and rolling
+// out a change means a new image tag on the Domain resource.
+//
+// Cost of that: this job is no longer seconds-fast -- it is a packer build plus
+// a rolling restart of the cluster. In exchange the deployment actually
+// survives pod restarts, node drains and rescheduling.
 //
 // Requires the 'homelab' SSH agent (see jenkins/README.md).
 // ============================================================================
@@ -14,7 +26,7 @@ pipeline {
         timestamps()
         disableConcurrentBuilds()
         buildDiscarder(logRotator(numToKeepStr: '50'))
-        timeout(time: 30, unit: 'MINUTES')
+        timeout(time: 60, unit: 'MINUTES')
     }
 
     environment {
@@ -60,7 +72,7 @@ set -euo pipefail
             }
         }
 
-        stage('Deploy') {
+        stage('Build application image') {
             steps {
                 withCredentials([usernamePassword(
                     credentialsId: 'oracle-app',
@@ -69,7 +81,82 @@ set -euo pipefail
                     sh """#!/bin/bash
 set -euo pipefail
                         cd ansible
-                        ansible-playbook playbooks/deploy-app.yml \\
+                        ansible-playbook playbooks/build-app.yml \\
+                          -e "db_mode=\${DB_MODE}" \\
+                          -e "app_repo_version=\${APP_BRANCH}" \\
+                          -e "oracle_app_user=\${ORA_APP_USER}" \\
+                          -e "oracle_app_password=\${ORA_APP_PASS}"
+                    """
+                }
+                sh '''#!/bin/bash
+set -euo pipefail
+                    cd packer/wls-domain-image
+                    mkdir -p .generated
+                    test -s .generated/archive.zip
+                    # 3.x, not 2.x: homelab-iac tags its images 2.<its build
+                    # number>, and the two jobs number independently -- sharing
+                    # a series would let them overwrite each other's images.
+                    packer build -var "image_tag=3.${BUILD_NUMBER}" .
+                '''
+                script { env.DOMAIN_IMAGE = "wls-domain-image:3.${env.BUILD_NUMBER}" }
+            }
+        }
+
+        stage('Load image onto k8s nodes') {
+            steps {
+                // No registry in this homelab: packer only produces a local
+                // docker image on this host, while the nodes pull from their
+                // own containerd with imagePullPolicy IfNotPresent. Import it
+                // onto every node or the new pods ErrImagePull.
+                sh '''#!/bin/bash
+set -euo pipefail
+                    mp() { if multipass "$@" 2>/dev/null; then return 0; else sudo -n multipass "$@"; fi; }
+                    MASTER_VM=$(echo 'var.master_name' | terraform -chdir=terraform/05-k8s-multipass console -no-color | tr -d '"')
+                    WORKER_VMS=$(echo 'join(" ", var.worker_names)' | terraform -chdir=terraform/05-k8s-multipass console -no-color | tr -d '"')
+                    TAG="wls-domain-image:3.${BUILD_NUMBER}"
+                    TAR="packer/wls-domain-image/.generated/domain-image-3.${BUILD_NUMBER}.tar"
+                    docker save "$TAG" -o "$TAR"
+                    for vm in "$MASTER_VM" $WORKER_VMS; do
+                        echo "[image] loading $TAG onto $vm"
+                        mp transfer "$TAR" "$vm":/tmp/domain-image.tar
+                        mp exec "$vm" -- sudo ctr -n k8s.io images import /tmp/domain-image.tar
+                        mp exec "$vm" -- rm -f /tmp/domain-image.tar
+                    done
+                    rm -f "$TAR"
+                '''
+            }
+        }
+
+        stage('Roll the domain onto the new image') {
+            steps {
+                // Changing spec.image is what makes the operator restart the
+                // servers onto the new application. Terraform waits for the
+                // domain to report Available again, so this stage finishing
+                // means the roll actually completed.
+                sh """#!/bin/bash
+set -euo pipefail
+                    terraform -chdir=terraform/20-wls-k8s init -reconfigure -no-color -input=false
+                    terraform -chdir=terraform/20-wls-k8s apply -no-color -auto-approve \\
+                      -var "domain_image=${env.DOMAIN_IMAGE}"
+                """
+            }
+        }
+
+        stage('Refresh routing') {
+            steps {
+                // JVM route ids change when servers restart, so nginx must be
+                // re-templated against the new ones or session affinity breaks.
+                withCredentials([usernamePassword(
+                    credentialsId: 'oracle-app',
+                    usernameVariable: 'ORA_APP_USER',
+                    passwordVariable: 'ORA_APP_PASS')]) {
+                    sh """#!/bin/bash
+set -euo pipefail
+                        cd ansible
+                        # --skip-tags verify: the Verify stage below owns
+                        # verification (and honours SKIP_VERIFY). Running it
+                        # here too would repeat the destructive pod-kill check.
+                        ansible-playbook playbooks/deploy-app.yml --skip-tags verify \\
                           -e "db_mode=\${DB_MODE}" \\
                           -e "app_repo_version=\${APP_BRANCH}" \\
                           -e "oracle_app_user=\${ORA_APP_USER}" \\

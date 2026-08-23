@@ -81,5 +81,23 @@ topology:
         NodeManagerPasswordEncrypted: '@@SECRET:__weblogic-credentials__:password@@'
 
 appDeployments:
-    # The application WAR is deployed by Ansible/Jenkins after the domain is
-    # healthy, NOT baked in — so an app change does not require an image rebuild.
+    # The application ships INSIDE the image, as a WDT archive entry.
+    #
+    # It used to be deployed at runtime instead: Ansible copied the WAR into
+    # the AdminServer pod and ran WLST deploy(). That kept app changes off the
+    # image-rebuild path, but it does not survive a pod restart. This is a
+    # Model-in-Image domain (domainHomeSourceType: FromModel), so every pod
+    # regenerates $DOMAIN_HOME from this model on every start -- a runtime
+    # deployment lives only in that ephemeral domain home and in the running
+    # JVM. Kill a managed-server pod and the replacement comes back with no
+    # application at all; restart the AdminServer and even the config record
+    # disappears (observed: domainConfig/appDeployments returned an empty list
+    # while ms1/ms2 were still serving the app purely from memory).
+    #
+    # SourcePath is relative to the archive root, so 'wlsdeploy/applications/x'
+    # resolves to the entry packer stages at /u01/wdt/models/archive.zip.
+    Application:
+        '@@PROP:app.name@@':
+            SourcePath: 'wlsdeploy/applications/@@PROP:app.war@@'
+            ModuleType: war
+            Target: '@@PROP:cluster.name@@'

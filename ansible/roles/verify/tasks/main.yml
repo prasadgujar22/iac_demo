@@ -146,6 +146,113 @@
   register: roundtrip
   changed_when: false
 
+- name: Session survives losing the pod that owns it
+  # The point of replicated_if_clustered. Every check above proves affinity --
+  # that a session STAYS on one server. This proves the opposite case: that it
+  # SURVIVES that server disappearing.
+  #
+  # Deliberately destructive: it deletes a managed-server pod and waits for the
+  # replacement. Set verify_session_failover=false to skip it.
+  when: verify_session_failover | default(true) | bool
+  ansible.builtin.shell:
+    cmd: |
+      set -uo pipefail
+      BASE="http://{{ proxy_lan_ip }}:{{ proxy_listen_port }}{{ app_context_root }}"
+      NS="{{ wls_namespace }}"
+      # "name:nodeport" per managed server, so the shell can loop over them
+      # without Jinja block tags inside this script.
+      PAIRS="{% for ms in managed_servers %}{{ ms.name }}:{{ ms.nodeport }} {% endfor %}"
+      NODE="{{ k8s_node_ip }}"
+      J=$(mktemp)
+      trap 'rm -f "$J"' EXIT
+
+      # 1. Establish a logged-in session through the proxy.
+      curl -s -m 15 -c "$J" -o /dev/null "$BASE/login"
+      curl -s -m 15 -b "$J" -c "$J" -o /dev/null -X POST \
+        -d "username={{ app_login_username }}&password={{ app_login_password }}" "$BASE/login"
+      if ! curl -s -m 20 -b "$J" "$BASE/dashboard" | grep -q "Customer Onboarding Dashboard"; then
+        echo "FAIL: could not establish a logged-in session to begin with"
+        exit 1
+      fi
+
+      SID=$(awk '$6 == "JSESSIONID" {print $7}' "$J")
+      if [ -z "$SID" ]; then echo "FAIL: no JSESSIONID cookie"; exit 1; fi
+
+      # 2. A replicated session carries BOTH a primary and a secondary JVM id
+      #    (id!primary!secondary). Only a primary means replication is off: the
+      #    session would die with its server. Fail here rather than after the
+      #    kill, where the same symptom would look like a failover bug.
+      PRIMARY=$(echo "$SID"   | awk -F'!' '{print $2}')
+      SECONDARY=$(echo "$SID" | awk -F'!' '{print $3}')
+      if [ -z "$PRIMARY" ] || [ -z "$SECONDARY" ]; then
+        echo "FAIL: session is not replicated (cookie=$SID)"
+        echo "      expected id!primaryJVMID!secondaryJVMID -- check that weblogic.xml"
+        echo "      sets persistent-store-type replicated_if_clustered"
+        exit 1
+      fi
+      echo "session replicated: primary=$PRIMARY secondary=$SECONDARY"
+
+      # 3. Identify which server owns the primary, reading each server's own
+      #    route id exactly the way the nginx role discovers them.
+      OWNER=""; OPORT=""
+      for pair in $PAIRS; do
+        n="${pair%%:*}"; p="${pair##*:}"
+        RID=$(curl -s -i -m 15 "http://$NODE:$p{{ app_context_root }}/login" \
+              | tr -d '\r' | sed -n 's/.*JSESSIONID=[^;]*!\([-0-9]*\).*/\1/p' | head -1)
+        if [ "$RID" = "$PRIMARY" ]; then OWNER="$n"; OPORT="$p"; fi
+      done
+      if [ -z "$OWNER" ]; then echo "FAIL: no managed server claims route id $PRIMARY"; exit 1; fi
+      POD="{{ wls_domain_uid }}-$OWNER"
+      echo "primary session owner: $OWNER (pod $POD)"
+
+      # 4. Kill it.
+      kubectl -n "$NS" delete pod "$POD" --wait=false >/dev/null 2>&1 || {
+        echo "FAIL: could not delete $POD"; exit 1; }
+      for i in $(seq 1 30); do
+        READY=$(kubectl -n "$NS" get pod "$POD" -o jsonpath='{.status.containerStatuses[0].ready}' 2>/dev/null)
+        [ "$READY" = "true" ] || break
+        sleep 2
+      done
+      echo "$POD is down"
+
+      # 5. The session must still be alive on the peer holding the replica.
+      #    nginx needs max_fails failures before it marks the dead upstream
+      #    down, so the first attempt may legitimately fail: retry briefly.
+      OK=0
+      for i in $(seq 1 15); do
+        if curl -s -m 20 -b "$J" "$BASE/dashboard" | grep -q "Customer Onboarding Dashboard"; then
+          OK=1; break
+        fi
+        sleep 4
+      done
+      if [ "$OK" -ne 1 ]; then
+        echo "FAIL: session did not survive the loss of $OWNER"
+        echo "      (the same JSESSIONID no longer renders the dashboard)"
+        exit 1
+      fi
+      echo "PASS: session survived losing $OWNER"
+
+      # 6. The replacement pod must come back WITH the application. That is
+      #    what baking the WAR into the image buys; a runtime-deployed app
+      #    comes back empty here.
+      kubectl -n "$NS" wait --for=condition=Ready "pod/$POD" --timeout=300s >/dev/null 2>&1 || {
+        echo "FAIL: $POD did not become Ready again"; exit 1; }
+      RC=""
+      for i in $(seq 1 20); do
+        RC=$(curl -s -o /dev/null -m 15 -w '%{http_code}' "http://$NODE:$OPORT{{ app_context_root }}/login")
+        [ "$RC" = "200" ] && break
+        sleep 5
+      done
+      if [ "$RC" != "200" ]; then
+        echo "FAIL: $OWNER came back without the application (HTTP $RC)"
+        echo "      the WAR must be baked into the domain image, not deployed at runtime"
+        exit 1
+      fi
+      echo "PASS: $OWNER came back serving the application from the image"
+  register: failover
+  changed_when: false
+
+
 - name: Verification summary
   ansible.builtin.debug:
     msg:
@@ -156,5 +263,6 @@
       - "session affinity ..... {{ affinity.stdout_lines | last }}"
       - "distribution ......... {{ distribution.stdout_lines | last }}"
       - "write/read round trip  {{ roundtrip.stdout_lines | last }}"
+      - "session failover ..... {{ failover.stdout_lines | last if failover is not skipped else 'SKIPPED' }}"
       - ""
       - "APPLICATION URL: http://{{ proxy_lan_ip }}:{{ proxy_listen_port }}{{ app_context_root }}/login"

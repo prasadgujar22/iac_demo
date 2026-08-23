@@ -1,0 +1,108 @@
+---
+# Build the application WAR and package it as a WDT archive for the domain image.
+#
+# This role deliberately does NOT deploy anything. The domain is Model-in-Image,
+# so every pod rebuilds $DOMAIN_HOME from the WDT model on each start; a runtime
+# WLST deployment (which is what this role used to do) lives only in that
+# ephemeral domain home and is lost the moment a pod restarts. The application
+# now ships inside the image via appDeployments, and the archive built here is
+# what `packer build` stages at /u01/wdt/models/archive.zip.
+
+- name: Ensure build directory exists
+  ansible.builtin.file:
+    path: "{{ app_build_dir }}"
+    state: directory
+    mode: "0755"
+
+- name: Stage the vendored application source
+  # The application is VENDORED at app/customer-onboarding in this repo, so the
+  # build uses exactly the code that was reviewed alongside the IaC — no drift
+  # between what CI builds and what the repo contains.
+  #
+  # Previously this cloned the upstream repo, which failed in CI with
+  #   Failed to set a new url https://github.com/.../java_session_management_demo
+  # and would silently build different code from the vendored copy anyway.
+  ansible.builtin.copy:
+    src: "{{ repo_root }}/app/customer-onboarding/"
+    dest: "{{ app_build_dir }}/src/"
+    mode: preserve
+    remote_src: true
+
+- name: Ensure the required JDBC driver is a dependency
+  # H2 for embedded mode, ojdbc11 for Oracle. Both are declared so db_mode can be
+  # switched without editing the build.
+  ansible.builtin.blockinfile:
+    path: "{{ app_build_dir }}/src/pom.xml"
+    marker: "        <!-- {mark} ANSIBLE MANAGED: jdbc drivers -->"
+    insertbefore: "    </dependencies>"
+    block: |
+      <dependency>
+          <groupId>com.h2database</groupId>
+          <artifactId>h2</artifactId>
+          <version>{{ h2_version }}</version>
+      </dependency>
+  register: pom_patch
+
+- name: Render web.xml with the selected database mode
+  ansible.builtin.template:
+    src: web.xml.j2
+    dest: "{{ app_build_dir }}/src/src/main/webapp/WEB-INF/web.xml"
+    mode: "0644"
+  register: webxml
+
+- name: Build the WAR
+  ansible.builtin.command:
+    cmd: mvn -q -B clean package
+    chdir: "{{ app_build_dir }}/src"
+  register: mvn_build
+  changed_when: true
+
+- name: Confirm the WAR was produced
+  ansible.builtin.stat:
+    path: "{{ app_build_dir }}/src/target/{{ app_war_name }}"
+  register: war_file
+
+- name: Fail if the WAR is missing
+  ansible.builtin.assert:
+    that:
+      - war_file.stat.exists
+      - war_file.stat.size > 1000000
+    fail_msg: "Build did not produce a usable {{ app_war_name }}."
+
+- name: Verify the JDBC driver jar is packaged inside the WAR
+  # Catches the "No suitable driver found" class of failure before deployment.
+  ansible.builtin.shell:
+    cmd: "unzip -l {{ app_build_dir }}/src/target/{{ app_war_name }} | grep -E 'WEB-INF/lib/(h2|ojdbc)'"
+  register: war_drivers
+  changed_when: false
+
+- name: Package the WAR into a WDT archive
+  # WDT resolves an application's SourcePath relative to the archive root, so
+  # the model's 'wlsdeploy/applications/<war>' requires exactly this layout.
+  # `zip -j` would flatten it away, so build the directory tree and zip it.
+  ansible.builtin.shell:
+    cmd: |
+      set -euo pipefail
+      STAGE="{{ app_build_dir }}/archive"
+      rm -rf "$STAGE"
+      mkdir -p "$STAGE/wlsdeploy/applications"
+      cp "{{ app_build_dir }}/src/target/{{ app_war_name }}" \
+         "$STAGE/wlsdeploy/applications/{{ app_war_name }}"
+      mkdir -p "{{ wdt_archive_path | dirname }}"
+      rm -f "{{ wdt_archive_path }}"
+      cd "$STAGE" && zip -qr "{{ wdt_archive_path }}" wlsdeploy
+  changed_when: true
+
+- name: Confirm the archive contains the application at the modelled path
+  # The model names this exact path. A mismatch here fails the introspector
+  # much later with a far less obvious message, so assert it at build time.
+  ansible.builtin.shell:
+    cmd: "unzip -l {{ wdt_archive_path }} | grep -F 'wlsdeploy/applications/{{ app_war_name }}'"
+  register: archive_entry
+  changed_when: false
+
+- name: Report the archive that packer will bake into the image
+  ansible.builtin.debug:
+    msg: >-
+      WDT archive ready at {{ wdt_archive_path }}
+      ({{ archive_entry.stdout | trim }})

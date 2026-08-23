@@ -31,7 +31,19 @@ variable "domain_home" {
 variable "domain_image" {
   description = "Model-in-Image domain image, produced by the Packer stage."
   type        = string
-  default     = "wls-domain-image:2.6"
+
+  # This default is the source of truth for every run that does NOT build an
+  # image (the Jenkinsfile only passes -var domain_image when BUILD_IMAGE=true),
+  # so it must always name a tag that (a) exists in containerd on every k8s node
+  # -- nothing here pushes to a registry and pods pull IfNotPresent -- and
+  # (b) contains the application.
+  #
+  # (b) is new and is why 2.6 is no longer valid: every 2.x image predates
+  # baking the WAR into the image, so its WDT model declares no appDeployments.
+  # Rolling the domain onto one now would bring the cluster up healthy and
+  # completely empty -- HTTP 404 on every application URL, with nothing in the
+  # logs that looks like a failure.
+  default = "wls-domain-image:9.1"
 }
 
 variable "cluster_name" {

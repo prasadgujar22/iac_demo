@@ -18,20 +18,34 @@
 {% endfor %}
 ##
 
-# Map the cookie's route-ID suffix to the upstream that owns the session.
-# The (!|$) anchor matters: a replicated session appends a SECONDARY JVM ID
-# (!primary!secondary), and matching the primary must still work.
+# Map the cookie's PRIMARY route ID to the upstream that owns the session.
+#
+# A replicated session's cookie is <sessionid>!<primaryJVMID>!<secondaryJVMID>,
+# so the pattern must anchor on the primary POSITION, not merely contain the id:
+#   ^[^!]+   the session id, which never contains '!'
+#   <route>  this server's route id (the captured value already starts with '!')
+#   (!|$)    followed by the secondary id, or by end-of-cookie when the session
+#            is not replicated
+#
+# An unanchored "~<route>(!|$)" looks equivalent and is not: it also matches the
+# id in the SECONDARY position, so every session whose replica happened to live
+# on the first-listed server was routed to that server rather than to the one
+# holding the primary. nginx tries map patterns in order and the first match
+# wins, so this silently collapsed traffic onto one server -- measured as 10 of
+# 10 new sessions landing on ms1 once replication was switched on. It was
+# harmless before then only because a non-replicated cookie carries no secondary
+# id for the pattern to match against.
 map $cookie_jsessionid $wls_route {
-    default {{ ' ' * 18 }}wls_balanced;
+    default {{ ' ' * 26 }}wls_balanced;
 {% for r in wls_routes %}
-    "~{{ r.route_id }}(!|$)" wls_{{ r.name }};
+    "~^[^!]+{{ r.route_id }}(!|$)" wls_{{ r.name }};
 {% endfor %}
 }
 
 map $cookie_jsessionid $wls_route_reason {
-    default {{ ' ' * 18 }}"new-session:balanced";
+    default {{ ' ' * 26 }}"new-session:balanced";
 {% for r in wls_routes %}
-    "~{{ r.route_id }}(!|$)" "pinned:{{ r.name }}";
+    "~^[^!]+{{ r.route_id }}(!|$)" "pinned:{{ r.name }}";
 {% endfor %}
 }
 

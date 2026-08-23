@@ -1,0 +1,8 @@
+---
+h2_version: 2.2.224
+wls_admin_username: prasadmin
+
+# Where the WDT archive is written. Packer's `app_archive` variable defaults to
+# the same path (relative to packer/wls-domain-image), so a plain
+# `packer build .` picks up whatever this role produced.
+wdt_archive_path: "{{ repo_root }}/packer/wls-domain-image/.generated/archive.zip"

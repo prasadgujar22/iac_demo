@@ -39,7 +39,7 @@ Only the LAN entry point needs a bridge, because Multipass VMs are NAT'd.
 | `terraform/10-db-multipass/` | Terraform | VM that *hosts* the Oracle XE container |
 | `terraform/20-wls-k8s/` | Terraform | Namespace, secrets, Domain/Cluster CRs, NodePorts |
 | `terraform/30-nginx-multipass/` | Terraform | nginx proxy VM |
-| `ansible/` | Ansible | Oracle XE **container**, app build+deploy, socat bridges, nginx config |
+| `ansible/` | Ansible | Oracle XE **container**, app build, socat bridges, nginx config |
 | `jenkins/` | Jenkins | Pipelines: full infra, app-only redeploy, teardown |
 | `app/customer-onboarding/` | Maven | The application, with the fixes described below |
 
@@ -131,10 +131,48 @@ reviewed and versioned together:
    untouched on edit. Values re-rendered into the form are HTML-escaped, since
    existing data may legitimately contain `&`/`"`/`<`/`>`.
 
+6. **Replicated HTTP sessions** — `weblogic.xml` sets
+   `persistent-store-type=replicated_if_clustered`, so every session has a
+   secondary copy on the other managed server and survives losing the pod that
+   owns the primary. `verify` proves this by killing that pod and re-using the
+   same `JSESSIONID`.
+
 The application is built and deployed by the `homelab-app` Jenkins pipeline
 (see below) — not by uploading a WAR through the WebLogic console by hand, as
 the vendored `app/customer-onboarding/README.md` describes for a standalone
 checkout.
+
+### Shipping an application change
+
+The WAR is **baked into the domain image**, not deployed at runtime. The domain
+is Model-in-Image (`domainHomeSourceType: FromModel`), so every pod rebuilds
+`$DOMAIN_HOME` from the WDT model on each start: an application deployed with
+WLST lives only in that ephemeral domain home, and any pod restart brings the
+pod back with no application at all. `appDeployments` in
+`packer/wls-domain-image/model/wls-domain-model.yaml` points at a WAR carried in
+the image's WDT archive instead.
+
+Shipping a change is therefore four steps, which the `homelab-app` job performs
+in order:
+
+1. `ansible-playbook playbooks/build-app.yml` — build the WAR (templating
+   `web.xml` for `DB_MODE`) and zip it to
+   `packer/wls-domain-image/.generated/archive.zip`.
+2. `packer build` — bake that archive into a new image tag.
+3. `docker save` + `multipass transfer` + `ctr images import` onto **every** k8s
+   node. There is no registry here and pods pull with `imagePullPolicy:
+   IfNotPresent`, so an image missing from one node is an `ErrImagePull` the
+   moment a pod schedules there.
+4. `terraform apply -var domain_image=…` — changing `spec.image` is what makes
+   the operator roll the servers onto the new application, one at a time.
+
+**Consequence to know about:** `web.xml` is templated at *build* time, so the
+JDBC URL — including the database VM's IP — is fixed in the image. If that IP
+changes (Multipass addresses are pinned per VM but not reserved, so a recreate
+can move them), the image must be rebuilt. Running `homelab-app` does exactly
+that. Making the app read its JDBC settings from the environment, injected via
+the Domain's `serverPod.env`, would remove this coupling and is the obvious
+next improvement.
 
 ## Adopting existing hand-built infrastructure
 
@@ -169,7 +207,7 @@ make ssh-key           # one-off: create the keypair injected into new VMs
 make preflight         # verify toolchain + platform health
 make plan              # terraform plan across all stacks (read-only)
 make infra             # provision DB + WLS + nginx
-make app               # build WAR and deploy to the cluster
+make app               # build WAR, bake it into a new domain image
 make verify            # end-to-end assertions incl. session affinity
 ```
 

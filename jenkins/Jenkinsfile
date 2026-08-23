@@ -221,7 +221,15 @@ set -euo pipefail
 set -euo pipefail
                             cd packer/wls-domain-image
                             packer init .
-                            packer validate .
+                            # `packer validate` resolves the file provisioner's
+                            # source path, and the real application archive only
+                            # exists once build-app.yml has run (which happens in
+                            # "Build domain image", later). Validate the template
+                            # against a throwaway file so this stage checks syntax
+                            # without depending on build order.
+                            STUB="$(mktemp -d)/archive.zip"
+                            touch "$STUB"
+                            packer validate -var "app_archive=$STUB" .
                         '''
                     }
                 }
@@ -235,6 +243,25 @@ set -euo pipefail
                 // WDT model resolves them from the operator's
                 // __weblogic-credentials__ K8s secret at domain-creation time
                 // (see terraform/20-wls-k8s), so packer needs no credentials.
+                withCredentials([usernamePassword(
+                    credentialsId: 'oracle-app',
+                    usernameVariable: 'ORA_APP_USER',
+                    passwordVariable: 'ORA_APP_PASS')]) {
+                    sh '''#!/bin/bash
+set -euo pipefail
+                        # The application is baked INTO the image (the domain is
+                        # Model-in-Image, so a runtime deployment does not survive
+                        # a pod restart). Build the WAR and package it as a WDT
+                        # archive before packer runs -- packer's app_archive
+                        # variable defaults to exactly this path.
+                        cd ansible
+                        ansible-playbook playbooks/build-app.yml \
+                          -e "db_mode=${DB_MODE}" \
+                          -e "app_repo_version=${APP_BRANCH}" \
+                          -e "oracle_app_user=${ORA_APP_USER}" \
+                          -e "oracle_app_password=${ORA_APP_PASS}"
+                    '''
+                }
                 sh '''#!/bin/bash
 set -euo pipefail
                     cd packer/wls-domain-image
@@ -243,6 +270,7 @@ set -euo pipefail
                     # local_file resource, Packer's manifest post-processor
                     # does not create its own parent directory.
                     mkdir -p .generated
+                    test -s .generated/archive.zip
                     # Tag by build number so a bad image can be rolled back.
                     packer build \
                       -var "image_tag=2.${BUILD_NUMBER}" \
@@ -427,9 +455,11 @@ set -euo pipefail
                     // Secrets arrive as env vars and are passed via -e without ever
                     // being written to disk or echoed.
                     script {
-                        // Skip the app tag when DEPLOY_APP is false; there is no
-                        // shell-side conditional in --skip-tags.
-                        def skip = params.DEPLOY_APP ? '' : '--skip-tags app'
+                        // The application is no longer deployed by Ansible (it
+                        // ships in the domain image), so site.yml has no app play
+                        // and nothing here to skip. DEPLOY_APP now gates the
+                        // post-deployment wiring stage below instead.
+                        def skip = ''
                         sh """#!/bin/bash
 set -euo pipefail
                             cd ansible
@@ -446,7 +476,10 @@ set -euo pipefail
             }
         }
 
-        stage('Deploy application') {
+        // Named for what it does now: the application itself arrives with the
+        // image, so what is left is re-templating nginx against the running
+        // domain's JVM route ids and re-verifying end to end.
+        stage('Refresh routing and verify app') {
             when {
                 allOf {
                     expression { params.DEPLOY_APP }

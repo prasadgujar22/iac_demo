@@ -83,8 +83,21 @@ infra: preflight init ## Provision infrastructure (prompts before applying)
 import: init ## Adopt existing hand-built infrastructure into Terraform state
 	@./scripts/import-existing.sh
 
-app: ## Build and deploy the application only
-	@cd ansible && $(AP) playbooks/deploy-app.yml \
+app: ## Build the app into a WDT archive, bake an image and roll the domain
+# The application is baked into the domain image (Model-in-Image: a runtime
+# WLST deploy does not survive a pod restart), so shipping an app change is
+# build archive -> packer -> new image tag on the Domain. The image must also
+# be imported onto every k8s node; there is no registry in this homelab, so
+# the Jenkins `homelab-app` job is the supported path for that. This target
+# covers the local half: archive + image.
+	@cd ansible && $(AP) playbooks/build-app.yml \
+	  -e "db_mode=$(DB_MODE)" -e "app_repo_version=$(APP_BRANCH)"
+	@cd packer/wls-domain-image && packer build .
+	@echo "Image built. Load it onto the k8s nodes and roll the domain:"
+	@echo "  jenkins job 'homelab-app', or see README 'Shipping an application change'."
+
+app-archive: ## Build only the WDT archive packer bakes into the image
+	@cd ansible && $(AP) playbooks/build-app.yml \
 	  -e "db_mode=$(DB_MODE)" -e "app_repo_version=$(APP_BRANCH)"
 
 verify: ## End-to-end verification incl. session affinity

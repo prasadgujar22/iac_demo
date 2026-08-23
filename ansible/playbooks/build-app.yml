@@ -1,15 +1,15 @@
 ---
-# Full stack configuration. Terraform provisions; Ansible configures.
+# Build the application into a WDT archive for the domain image.
 #
-# Run order matters: the database must be reachable before the app serves
-# traffic, the app must be running before nginx can discover JVM route IDs, and
-# the LAN bridges must exist before anything can be probed.
+# Runs BEFORE `packer build`: the domain is Model-in-Image, so the application
+# is baked into the image via appDeployments rather than deployed at runtime
+# (a runtime deployment does not survive a pod restart). The DB-host
+# resolution below is not incidental -- web.xml is templated with the JDBC URL
+# at build time, so in oracle mode the database must be resolvable now.
 #
-# The application itself is NOT deployed here any more: it is baked into the
-# domain image (Model-in-Image), so it is already running by the time this
-# playbook executes. See playbooks/build-app.yml.
-
-- name: Load Terraform outputs as facts
+# Deploying the result is Terraform's job: a new image tag on the Domain
+# resource makes the operator roll the domain onto it.
+- name: Load database facts
   hosts: localhost
   connection: local
   gather_facts: false
@@ -33,25 +33,26 @@
 
     - name: Fall back to the shared Terraform state for the database host
       # The generated inventory only exists in the workspace that ran `apply`.
-      # Other Jenkins jobs have their own workspaces, so the file is absent and
-      # the host would silently resolve to '' — rendering a JDBC URL against
-      # localhost and failing later as ORA-12541. The shared state backend is
-      # authoritative and visible to every job.
+      # The app-redeploy job has its OWN workspace, so the file is absent there,
+      # the host silently resolved to '', and the rendered JDBC URL pointed at
+      # localhost — breaking a working deployment with
+      #   ORA-12541: Cannot connect. No listener at host localhost port 1521
       #
-      # `init` first: a workspace that never initialised this stack fails with
-      # "Backend initialization required" on `output` alone.
+      # The shared state backend is authoritative and visible to every job, so
+      # query it whenever the inventory file is missing.
       ansible.builtin.shell:
         cmd: >-
           terraform -chdir={{ repo_root }}/terraform/10-db-multipass
           init -reconfigure -no-color -input=false >/dev/null 2>&1;
           terraform -chdir={{ repo_root }}/terraform/10-db-multipass
           output -raw db_host 2>/dev/null
+        # `init` first: the app-redeploy workspace has never initialised this
+        # stack, so `output` alone fails with "Backend initialization required".
+        # -reconfigure because the shared backend is authoritative.
       register: db_host_tf
       changed_when: false
       failed_when: false
-      when:
-        - db_mode == 'oracle'
-        - not db_inv.stat.exists
+      when: not db_inv.stat.exists
 
     - name: Derive the database host from the Terraform-generated inventory
       # The expression must be self-guarding: Ansible finalizes set_fact args
@@ -64,24 +65,25 @@
              | default([], true) | first
              | default(((db_host_tf | default({})).stdout | default('', true)) | trim, true)
              | default(oracle_db_host | default(''), true) }}
-      when: db_mode == 'oracle'
 
-    - name: Require a database host when running in oracle mode
+    - name: Require a usable database host in oracle mode
+      # Never render a JDBC URL with an empty host: Jinja turns it into
+      # localhost and the fault only surfaces later as ORA-12541, after the
+      # deployment has already replaced a working WAR.
       ansible.builtin.assert:
         that:
           - oracle_db_host is defined
           - oracle_db_host | length > 0
           - oracle_db_host != 'localhost'
         fail_msg: >-
-          db_mode=oracle but no database host is known. Apply
+          No database host resolved (db_mode=oracle). Apply
           terraform/10-db-multipass first, or run with -e db_mode=h2.
         success_msg: "database host resolved: {{ oracle_db_host }}"
-      when: db_mode == 'oracle'
+      when: (db_mode | default('oracle')) == 'oracle'
 
-    # This host has no physical LAN (the upstream repo's 192.168.29.x /
-    # 10.2.243.x addresses belong to the original Linux homelab box). The k8s
-    # cluster and nginx proxy are reached directly at their Multipass IPs
-    # instead, resolved here the same way oracle_db_host is above.
+    # This host has no physical LAN (see site.yml for the full explanation) —
+    # resolve the same overrides here since this playbook does not import
+    # site.yml.
     - name: Read the k8s master IP from the k8s stack's shared Terraform state
       ansible.builtin.shell:
         cmd: >-
@@ -98,8 +100,6 @@
         resolved_k8s_master_ip: "{{ (k8s_master_ip_tf.stdout | default('')) | trim }}"
 
     - name: Resolve the nginx proxy's Multipass IP for this environment
-      # Mirrors the lan_bridge role's own lookup: prefer the Terraform-generated
-      # proxy_internal_ip, fall back to the inventory's ansible_host.
       ansible.builtin.set_fact:
         resolved_proxy_ip: >-
           {{ hostvars[groups['nginx'][0]]['proxy_internal_ip']
@@ -107,54 +107,11 @@
              | default('') }}
       when: groups['nginx'] | default([]) | length > 0
 
-- name: Resolve environment networking overrides (no physical LAN on this host)
-  hosts: control:nginx
-  gather_facts: false
-  tags: [always]
-  tasks:
-    - name: Point k8s_node_ip/k8s_master_ip at the real Multipass master IP
-      ansible.builtin.set_fact:
-        k8s_node_ip: "{{ hostvars['localhost']['resolved_k8s_master_ip'] }}"
-        k8s_master_ip: "{{ hostvars['localhost']['resolved_k8s_master_ip'] }}"
-      when: hostvars['localhost']['resolved_k8s_master_ip'] | default('') | length > 0
-
-    - name: Point proxy_lan_ip at the real Multipass nginx IP
-      ansible.builtin.set_fact:
-        proxy_lan_ip: "{{ hostvars['localhost']['resolved_proxy_ip'] }}"
-      when: hostvars['localhost']['resolved_proxy_ip'] | default('') | length > 0
-
-- name: Configure the Oracle XE database tier
-  hosts: db
-  gather_facts: true
-  tags: [db]
-  roles:
-    - role: oracle_xe
-      when: db_mode == 'oracle'
-
-- name: Publish managed servers on the LAN
-  hosts: control
-  gather_facts: true
-  tags: [network, bridge]
-  roles:
-    # `control` is localhost here (no separate physical control-plane host on
-    # this port), so primary_ip/primary_nic (the original Linux homelab's
-    # physical LAN NIC) never resolve. lan_bridge's own precondition assert
-    # would hard-fail rather than skip, so gate it here instead: run unchanged
-    # on the real Linux host, no-op wherever that NIC doesn't exist. The app
-    # is still reachable directly at nginx's Multipass IP either way.
-    - role: lan_bridge
-      when: primary_ip in (ansible_facts['all_ipv4_addresses'] | default([]))
-
-- name: Configure the nginx reverse proxy
-  hosts: nginx
-  gather_facts: true
-  tags: [proxy, nginx]
-  roles:
-    - nginx_proxy
-
-- name: Verify the whole stack end to end
+- name: Build the application archive
   hosts: control
   gather_facts: false
-  tags: [verify]
+  tags: [app, build]
+  vars:
+    oracle_db_host: "{{ hostvars['localhost']['oracle_db_host'] | default('') }}"
   roles:
-    - verify
+    - app_build

@@ -54,6 +54,24 @@ variable "wdt_download_url" {
   default     = "https://github.com/oracle/weblogic-deploy-tooling/releases/latest/download/weblogic-deploy.zip"
 }
 
+variable "app_archive" {
+  type        = string
+  description = <<-EOT
+    WDT archive holding the application WAR, staged into the image at
+    /u01/wdt/models/archive.zip.
+
+    The model's appDeployments section resolves SourcePath
+    "wlsdeploy/applications/<war>" against this archive, so the build FAILS
+    if it is missing -- deliberately. An image whose model declares an
+    application it does not carry produces an introspector that cannot build
+    the domain, which is far harder to diagnose than a missing file here.
+
+    Built by `ansible-playbook playbooks/build-app.yml`, which compiles the
+    WAR (templating web.xml for the selected db_mode) and zips it to this path.
+  EOT
+  default     = "./.generated/archive.zip"
+}
+
 variable "domain_name" {
   type        = string
   description = "WebLogic domain name."
@@ -94,6 +112,11 @@ build {
     destination = "/tmp/model/"
   }
 
+  provisioner "file" {
+    source      = var.app_archive
+    destination = "/tmp/archive.zip"
+  }
+
   provisioner "shell" {
     inline = [
       "set -euo pipefail",
@@ -106,7 +129,17 @@ build {
       "mkdir -p /u01/wdt/models",
       "cp /tmp/model/*.yaml /u01/wdt/models/ 2>/dev/null || true",
       "cp /tmp/model/*.properties /u01/wdt/models/ 2>/dev/null || true",
+      "echo '[packer] staging application archive'",
+      "cp /tmp/archive.zip /u01/wdt/models/archive.zip",
       "chown -R oracle:root /u01/wdt || true",
+      # The model names the WAR by path inside the archive; a mismatch here
+      # only surfaces later as an introspector failure, so assert it now.
+      "echo '[packer] verifying the archive carries the application'",
+      "if ! unzip -l /u01/wdt/models/archive.zip | grep -q 'wlsdeploy/applications/.*\\.war'; then",
+      "  echo 'FATAL: archive.zip has no wlsdeploy/applications/*.war entry.' >&2",
+      "  unzip -l /u01/wdt/models/archive.zip >&2 || true",
+      "  exit 1",
+      "fi",
       "echo '[packer] verifying no datasource is baked into the model'",
       # Fail the build rather than ship an image that can wedge the domain.
       "if grep -RiEq '^[[:space:]]*JDBCSystemResource[[:space:]]*:' /u01/wdt/models/; then",
@@ -131,6 +164,7 @@ build {
       domain_name  = var.domain_name
       cluster_name = var.cluster_name
       servers      = "${var.managed_server_count}"
+      app_archive  = var.app_archive
     }
   }
 }

@@ -5,8 +5,39 @@
         xsi:schemaLocation="http://xmlns.oracle.com/weblogic/weblogic-web-app
         http://xmlns.oracle.com/weblogic/weblogic-web-app/1.9/weblogic-web-app.xsd">
 
-    <wls:context-root>/customer-onboarding</wls:context-root>
+    <!--
+      Element order follows the weblogic-web-app 1.9 XSD sequence:
+      session-descriptor, then container-descriptor, then context-root.
+      The schema defines a sequence rather than a choice, so a descriptor
+      placed out of order can be rejected at deployment time.
+    -->
+
+    <!--
+      In-memory session replication across the cluster.
+
+      replicated_if_clustered gives each session a SECONDARY copy on a second
+      managed server, so losing the pod that owns the primary does not lose
+      the session. The "_if_clustered" variant keeps the same WAR deployable
+      to a single, non-clustered server, where it degrades to ordinary
+      in-memory sessions instead of failing deployment.
+
+      Two prerequisites, both already true here:
+        1. Every attribute put in the session must be Serializable. This app
+           stores a Boolean and a String (LoginServlet), which are.
+        2. The JSESSIONID cookie gains a secondary JVM id, becoming
+           id!primaryJVMID!secondaryJVMID. The nginx template already matches
+           the PRIMARY route id with a "(!|$)" anchor and lists peer servers
+           as `backup`, so when the primary pod dies the request lands on the
+           server holding the secondary copy and the session is promoted
+           there.
+    -->
+    <wls:session-descriptor>
+        <wls:persistent-store-type>replicated_if_clustered</wls:persistent-store-type>
+    </wls:session-descriptor>
+
     <wls:container-descriptor>
         <wls:prefer-web-inf-classes>false</wls:prefer-web-inf-classes>
     </wls:container-descriptor>
+
+    <wls:context-root>/customer-onboarding</wls:context-root>
 </wls:weblogic-web-app>
