@@ -23,7 +23,7 @@
 - name: Install host metrics on every non-Kubernetes VM
   # The k8s nodes are covered by the DaemonSet above; these three are not in
   # any cluster and need the systemd unit instead.
-  hosts: obs:db:nginx
+  hosts: observability:db:nginx
   gather_facts: true
   tags: [observability, node]
   roles:
@@ -50,7 +50,7 @@
   # Empty until the 40-obs-multipass stack has been applied, which is exactly
   # what should happen: with no observability VM there is nowhere to put these,
   # and the exporters above are harmless on their own.
-  hosts: obs
+  hosts: observability
   gather_facts: true
   tags: [observability, obs]
   roles:
@@ -60,7 +60,7 @@
       observability_state: "{{ observability_state | default('present') }}"
 
 - name: Report where to look
-  hosts: obs
+  hosts: observability
   gather_facts: false
   tags: [observability, obs]
   tasks:

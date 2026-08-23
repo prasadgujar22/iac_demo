@@ -63,9 +63,13 @@
       delay: 5
       until: scraper_token.stdout | length > 0
 
+    # -o json and parse here, rather than -o jsonpath: the command module
+    # splits its argument with shlex, which strips the quotes a jsonpath filter
+    # needs around its value -- {?(@.type=="InternalIP")} arrives at kubectl as
+    # @.type==InternalIP and fails to parse. Sidestepping the quoting is more
+    # robust than trying to escape through YAML, shlex and jsonpath at once.
     - name: Collect the cluster's node addresses
-      ansible.builtin.command: >-
-        kubectl get nodes -o jsonpath={range.items[*]}{.status.addresses[?(@.type=="InternalIP")].address}{"\n"}{end}
+      ansible.builtin.command: kubectl get nodes -o json
       register: k8s_nodes
       changed_when: false
 
@@ -75,10 +79,14 @@
     - name: Publish cluster scrape facts
       ansible.builtin.set_fact:
         k8s_scrape_token: "{{ scraper_token.stdout | b64decode }}"
-        k8s_node_ips: "{{ k8s_nodes.stdout_lines | select('match', '^[0-9]') | list }}"
-        kube_state_metrics_endpoint: >-
-          {{ (k8s_nodes.stdout_lines | select('match', '^[0-9]') | list | first)
-             ~ ':' ~ kube_state_metrics_nodeport }}
+        k8s_node_ips: "{{ node_addresses }}"
+        kube_state_metrics_endpoint: "{{ node_addresses | first }}:{{ kube_state_metrics_nodeport }}"
+      vars:
+        node_addresses: >-
+          {{ (k8s_nodes.stdout | from_json)['items']
+             | map(attribute='status.addresses') | flatten
+             | selectattr('type', 'equalto', 'InternalIP')
+             | map(attribute='address') | list }}
 
     - name: Report what will be scraped
       ansible.builtin.debug:

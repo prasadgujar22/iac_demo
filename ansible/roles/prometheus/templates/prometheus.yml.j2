@@ -19,7 +19,7 @@ scrape_configs:
   # its exporter arrived by systemd or by Kubernetes.
   - job_name: node
     static_configs:
-{% for grp, tier in [('obs', 'observability'), ('db', 'database'), ('nginx', 'proxy')] %}
+{% for grp, tier in [('observability', 'observability'), ('db', 'database'), ('nginx', 'proxy')] %}
 {% for h in groups.get(grp, []) %}
       - targets: ['{{ hostvars[h].ansible_host }}:{{ node_exporter_port }}']
         labels: {tier: {{ tier }}, vm: {{ h }}}

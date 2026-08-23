@@ -161,7 +161,9 @@ data "external" "obs_vm_ip" {
 resource "local_file" "inventory" {
   filename = "${path.module}/.generated/obs_inventory.yaml"
   content = yamlencode({
-    obs = {
+    # Group name deliberately differs from the VM name: Ansible warns, and
+    # patterns become ambiguous, when a group and a host share one.
+    observability = {
       hosts = {
         (var.vm_name) = {
           ansible_host                 = data.external.obs_vm_ip.result.ip

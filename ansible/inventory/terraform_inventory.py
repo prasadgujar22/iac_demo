@@ -57,7 +57,7 @@ def base_inventory():
     """Static topology that never depends on Terraform state."""
     return {
         "_meta": {"hostvars": {}},
-        "all": {"children": ["control", "db", "nginx", "obs", "ungrouped"]},
+        "all": {"children": ["control", "db", "nginx", "observability", "ungrouped"]},
         # The host itself: runs socat bridges, kubectl and the Maven build.
         "control": {
             "hosts": ["localhost"],
@@ -65,10 +65,14 @@ def base_inventory():
         },
         "db": {"hosts": []},
         "nginx": {"hosts": []},
+        # Named "observability", not "obs", because the VM itself is called
+        # obs: a group and a host sharing a name makes every pattern that uses
+        # it ambiguous, and Ansible warns about exactly that.
+        #
         # Empty unless the observability stack has been deployed. Every play
         # that targets it must tolerate that: the application tiers are
         # expected to run with no monitoring at all.
-        "obs": {"hosts": []},
+        "observability": {"hosts": []},
     }
 
 
@@ -138,7 +142,7 @@ def merge_from_shared_state(inv, group, host_key, host_default, build_hostvars):
 GROUP_STACKS = {
     "db": "10-db-multipass",
     "nginx": "30-nginx-multipass",
-    "obs": "40-obs-multipass",
+    "observability": "40-obs-multipass",
 }
 
 
@@ -168,7 +172,7 @@ def build():
         },
     )
     merge_from_shared_state(
-        inv, "obs", "vm_name", "obs",
+        inv, "observability", "vm_name", "obs",
         lambda o: {
             "ansible_host": o.get("obs_ip"),
             "ansible_user": "ubuntu",
