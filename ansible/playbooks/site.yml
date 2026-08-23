@@ -146,6 +146,8 @@
       when: primary_ip in (ansible_facts['all_ipv4_addresses'] | default([]))
 
 - name: Configure the nginx reverse proxy
+  hosts: nginx
+  gather_facts: true
   # Also tagged verify: `--tags verify` (how the pipeline's Verify stage runs
   # this playbook) would otherwise skip this play and assert against whatever
   # route-id map was written last. Any JVM restart since then -- a rolling
