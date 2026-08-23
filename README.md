@@ -338,9 +338,38 @@ stop updating look identical to a healthy, idle database.
 | node_exporter (systemd) | obs, oracle-db, nginx-proxy | CPU, memory, disk, network |
 | node_exporter (DaemonSet) | k8s nodes | the same, on the same port — a node is a node however its exporter arrived |
 | nginx-prometheus-exporter | nginx-proxy | connections by state, requests, **accepted − handled** (dropped) |
+| prometheus-nginxlog-exporter | nginx-proxy | request **duration** as a histogram — p50/p95/p99 |
 | kube-state-metrics | cluster | deployments, pod phases, restart counts |
 | kubelet cAdvisor | cluster | per-container CPU and memory — what makes the WebLogic pods visible as pods |
 | sqlplus → textfile | oracle-db | sessions, tablespace headroom, SGA/PGA, application row count |
+
+### Latency needs the access log, not stub_status
+
+`stub_status` exposes counts only. There is no timing in it anywhere, so a p99
+computed from it would be a percentile of nothing. Request duration therefore
+comes from the access log: the proxy logs `rt=$request_time`, and a second
+exporter parses that into a histogram, which is what `histogram_quantile()`
+requires.
+
+Two details that are easy to get wrong:
+
+- **The `log_format` is defined in `wls-proxy.conf`**, not beside the exporter
+  that reads it. If it lived with the exporter, tearing down observability would
+  delete the format while that file still referenced it by name — `nginx -t`
+  fails and the next reload takes down the **proxy**. Tearing down monitoring
+  must never be able to break the thing being monitored. One definition in
+  `group_vars/all.yml` is shared by both, because a format that disagrees with
+  its parser produces no error, just silence.
+- **The histogram is `nginx_http_response_time_seconds_hist_bucket`.** With
+  buckets configured the exporter emits *both* a summary (with ready-made
+  `quantile` labels) and a separate `_hist` histogram. The dashboards use the
+  histogram: summary quantiles are computed by the exporter over its own window
+  and cannot be aggregated across instances or re-quantiled over an arbitrary
+  range, which is exactly what a dashboard asks of them.
+
+With no traffic in the window the rate is zero and `histogram_quantile` returns
+NaN, so the latency panels read "No data". That is an idle proxy, not a broken
+exporter — `nginx_up` and `nginx_parse_errors_total` tell the two apart.
 
 Four dashboards — Fleet, nginx, Kubernetes, Oracle — are **vendored as JSON**
 rather than imported by grafana.com ID, so the deploy needs no internet at run
@@ -359,6 +388,15 @@ provisioning errors do not stop Grafana — it starts happily and serves nothing
 
 Teardown removes the exporters from the tiers that survive *before* destroying
 the VM, so nothing is left listening on machines nothing scrapes.
+
+Teardown is a **separate job**, `homelab-observability-teardown`, mirroring
+`homelab-iac` / `homelab-teardown`: one job per direction, so a destructive
+action cannot be reached by mistyping a parameter on a routine deploy. It
+requires `CONFIRM=DESTROY`, offers `KEEP_EXPORTERS` for a redeploy-soon case,
+treats exporter removal as non-fatal (a powered-off tier must not strand the VM
+being destroyed — the build goes UNSTABLE instead), and finally asks
+**multipass** whether the VM is really gone, because this repo once shipped a
+teardown that reported `0 destroyed` while every VM kept running.
 
 ```bash
 make obs           # deploy (VM + exporters + Prometheus + Grafana)

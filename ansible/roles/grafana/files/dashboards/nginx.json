@@ -7,7 +7,7 @@
   ],
   "timezone": "browser",
   "schemaVersion": 39,
-  "version": 3,
+  "version": 4,
   "refresh": "30s",
   "editable": true,
   "time": {
@@ -839,7 +839,7 @@
           "legendFormat": "median"
         }
       ],
-      "description": "Computed from the exporter's histogram (the _hist series), not from its summary quantiles: only a histogram can be aggregated across instances and re-quantiled over an arbitrary window. Percentiles interpolate within a bucket, so resolution is bounded by the bucket boundaries.",
+      "description": "Computed from the exporter's histogram (the _hist series), not from its summary quantiles: only a histogram can be aggregated across instances and re-quantiled over an arbitrary window. Percentiles interpolate within a bucket, so resolution is bounded by the bucket boundaries. With no traffic in the window the rate is zero and histogram_quantile returns NaN, so the panel reads \"No data\" \u2014 that is an idle proxy, not a broken exporter. nginx_up and the parse-error counter distinguish the two.",
       "options": {
         "legend": {
           "displayMode": "list",
@@ -996,7 +996,8 @@
         "graphMode": "none",
         "justifyMode": "auto"
       },
-      "id": 13
+      "id": 13,
+      "description": " With no traffic in the window the rate is zero and histogram_quantile returns NaN, so the panel reads \"No data\" \u2014 that is an idle proxy, not a broken exporter. nginx_up and the parse-error counter distinguish the two."
     },
     {
       "type": "stat",
