@@ -331,7 +331,12 @@
       delay: 3
       until:
         - nlex_probe is succeeded
-        - "'nginx_http_response_time_seconds_bucket' in nlex_probe.content"
+        # _hist_bucket, not _bucket. With histogram_buckets configured this
+        # exporter emits BOTH a summary (nginx_http_response_time_seconds, with
+        # pre-computed quantile labels) and a separate histogram suffixed
+        # _hist. Only the histogram can be aggregated across instances, so it
+        # is the one the dashboard uses and the one worth asserting on.
+        - "'nginx_http_response_time_seconds_hist_bucket' in nlex_probe.content"
 
     # Parse errors mean the log_format and the exporter's format disagree --
     # the one failure mode this design is most exposed to, and it produces an
