@@ -41,6 +41,11 @@ pipeline {
             description: 'Unchecked = plan only (no changes). Checked = apply. Defaults to plan so an accidental build cannot mutate infrastructure.'
         )
         booleanParam(
+            name: 'AUTO_APPROVE',
+            defaultValue: true,
+            description: 'Run unattended. The two "Approve apply" prompts only re-ask what you already chose at launch (APPLY, DB_MODE, ...), and a build left waiting for a click times out and abandons a half-provisioned stack. Uncheck to review each plan before it is applied.'
+        )
+        booleanParam(
             name: 'DEPLOY_APP',
             defaultValue: true,
             description: 'Build the WAR and deploy it after provisioning.'
@@ -326,7 +331,10 @@ set -euo pipefail
         }
 
         stage('Approve apply — k8s tier') {
-            when { expression { params.APPLY } }
+            // Skipped entirely under AUTO_APPROVE: the launch parameters are
+            // the approval. Left in place, for a run you want to inspect
+            // plan-by-plan.
+            when { expression { params.APPLY && !params.AUTO_APPROVE } }
             steps {
                 script {
                     timeout(time: 15, unit: 'MINUTES') {
@@ -444,7 +452,7 @@ set -euo pipefail
         }
 
         stage('Approve apply') {
-            when { expression { params.APPLY } }
+            when { expression { params.APPLY && !params.AUTO_APPROVE } }
             steps {
                 script {
                     // Guard rail: provisioning touches shared host networking.
