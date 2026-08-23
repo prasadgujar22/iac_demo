@@ -57,12 +57,39 @@ locals {
   # killed client that somehow outlives us can never hold Terraform's
   # provisioner pipe open; stdout and stderr stay separate so callers keep
   # their usual redirection semantics.
+  #
+  # MP_DONE_CHECK shortens that wait. Waiting out the full timeout is pure
+  # waste when the remote command has ALREADY finished -- build #44 spent 20
+  # minutes of a 1200s watchdog on a kubeadm init that had completed inside
+  # the first 90 seconds. Set MP_DONE_CHECK to a probe that succeeds only
+  # once the remote command has exited and mp_wait kills the client as soon
+  # as it passes, returning 125 instead of 124.
+  #
+  # The probe must test that the command EXITED, not that its work looks
+  # done. Killing the client closes the channel, which can SIGHUP a remote
+  # command still running: a probe on a mid-run artifact (admin.conf appears
+  # in an early kubeadm phase) would cut short the very work it is waiting
+  # for. The callers below have the remote shell record its own exit code as
+  # its last action, and probe for that sentinel.
   mp_helper = <<-EOT
     mp() { if multipass "$@" 2>/dev/null; then return 0; else sudo -n multipass "$@"; fi; }
 
+    mp_kill() {
+      local pid="$1"
+      pkill -P "$pid" 2>/dev/null || true
+      kill "$pid" 2>/dev/null || true
+      sleep 2
+      pkill -9 -P "$pid" 2>/dev/null || true
+      kill -9 "$pid" 2>/dev/null || true
+      wait "$pid" 2>/dev/null || true
+    }
+
     mp_wait() {
       local secs="$1"; shift
-      local out err pid rc waited
+      local out err pid rc waited probe probe_after probe_every
+      probe="$${MP_DONE_CHECK:-}"
+      probe_after="$${MP_DONE_CHECK_AFTER:-60}"
+      probe_every="$${MP_DONE_CHECK_EVERY:-30}"
       out="$(mktemp -t mp_wait_out)"
       err="$(mktemp -t mp_wait_err)"
       mp "$@" >"$out" 2>"$err" &
@@ -71,14 +98,20 @@ locals {
       rc=0
       while kill -0 "$pid" 2>/dev/null; do
         if [ "$waited" -ge "$secs" ]; then
-          pkill -P "$pid" 2>/dev/null || true
-          kill "$pid" 2>/dev/null || true
-          sleep 2
-          pkill -9 -P "$pid" 2>/dev/null || true
-          kill -9 "$pid" 2>/dev/null || true
-          wait "$pid" 2>/dev/null || true
+          mp_kill "$pid"
           cat "$out"; cat "$err" >&2; rm -f "$out" "$err"
           return 124
+        fi
+        if [ -n "$probe" ] && [ "$waited" -ge "$probe_after" ] \
+           && [ "$(( waited % probe_every ))" -eq 0 ]; then
+          # Cleared for the probe itself: it is normally another mp_wait
+          # call, which must not recurse back into this branch.
+          if ( unset MP_DONE_CHECK; eval "$probe" ) >/dev/null 2>&1; then
+            echo "[mp_wait] remote command has already exited; multipass client still running after $waited s -- killing hung client" >&2
+            mp_kill "$pid"
+            cat "$out"; cat "$err" >&2; rm -f "$out" "$err"
+            return 125
+          fi
         fi
         sleep 2
         waited=$((waited + 2))
@@ -279,16 +312,28 @@ resource "null_resource" "kubeadm_init" {
       else
         echo "[k8s] running kubeadm init on ${var.master_name} ($MASTER_IP)"
         RC=0
-        mp_wait "${var.kubeadm_timeout}" exec "${var.master_name}" -- sudo kubeadm init \
-          --pod-network-cidr="${var.pod_cidr}" \
-          --apiserver-advertise-address="$MASTER_IP" \
-          --node-name="${var.master_name}" || RC=$?
+        # The remote shell records kubeadm's own exit code as its LAST action.
+        # That sentinel does two things the old admin.conf probe could not: it
+        # proves the command has exited (so killing a hung client truncates
+        # nothing), and it carries the REAL result. admin.conf is written in an
+        # early phase, so a kubeadm that died later still leaves one behind --
+        # which the old check would have read as success.
+        MP_DONE_CHECK="mp_wait 30 exec \"${var.master_name}\" -- test -f /run/kubeadm-init.rc" \
+        mp_wait "${var.kubeadm_timeout}" exec "${var.master_name}" -- sudo bash -c \
+          'rm -f /run/kubeadm-init.rc; kubeadm init --pod-network-cidr="${var.pod_cidr}" --apiserver-advertise-address="${data.external.master_vm_ip.result.ip}" --node-name="${var.master_name}"; RC=$?; echo $RC > /run/kubeadm-init.rc; exit $RC' || RC=$?
         if [ "$RC" -ne 0 ]; then
-          # A non-zero client exit does NOT mean kubeadm failed -- when the
-          # multipass client hangs (see mp_wait) the control plane is already
-          # up and the watchdog just killed a stuck client. Ask the VM.
-          if mp_wait 60 exec "${var.master_name}" -- test -f /etc/kubernetes/admin.conf >/dev/null 2>&1; then
-            echo "[k8s] WARN: multipass exec returned $RC (124 = watchdog kill), but /etc/kubernetes/admin.conf exists — control plane is up, continuing"
+          # A non-zero client exit does NOT mean kubeadm failed: 124 is a
+          # timeout kill, 125 a client still spinning after the remote command
+          # had already exited. Ask the VM what actually happened.
+          SENTINEL=$(mp_wait 60 exec "${var.master_name}" -- sudo cat /run/kubeadm-init.rc 2>/dev/null | tr -d '[:space:]' || true)
+          if [ -n "$SENTINEL" ] && [ "$SENTINEL" != "0" ]; then
+            echo "[k8s] ERROR: kubeadm init itself failed on ${var.master_name} (kubeadm exit $SENTINEL, client exit $RC)" >&2
+            exit 1
+          elif [ -n "$SENTINEL" ]; then
+            echo "[k8s] multipass exec returned $RC (124 = timeout kill, 125 = hung client after the command exited); kubeadm itself exited 0 — continuing"
+          elif mp_wait 60 exec "${var.master_name}" -- test -f /etc/kubernetes/admin.conf >/dev/null 2>&1; then
+            # No sentinel: /run is tmpfs, so a reboot mid-init clears it.
+            echo "[k8s] WARN: multipass exec returned $RC and no exit-code sentinel was written, but /etc/kubernetes/admin.conf exists — control plane appears up, continuing"
           else
             echo "[k8s] ERROR: kubeadm init failed (exit $RC) and ${var.master_name} has no /etc/kubernetes/admin.conf" >&2
             exit 1
@@ -365,12 +410,21 @@ resource "null_resource" "kubeadm_join" {
         JOIN_CMD=$(mp_wait 300 exec "${var.master_name}" -- sudo kubeadm token create --print-join-command)
         echo "[k8s] joining ${each.key}"
         RC=0
-        mp_wait "${var.kubeadm_timeout}" exec "${each.key}" -- sudo bash -c "$JOIN_CMD" || RC=$?
+        # Exit-code sentinel and completion probe, exactly as for kubeadm
+        # init above -- the join is the other call that can leave a client
+        # spinning long after the work is done.
+        MP_DONE_CHECK="mp_wait 30 exec \"${each.key}\" -- test -f /run/kubeadm-join.rc" \
+        mp_wait "${var.kubeadm_timeout}" exec "${each.key}" -- sudo bash -c \
+          "rm -f /run/kubeadm-join.rc; $JOIN_CMD; RC=\$?; echo \$RC > /run/kubeadm-join.rc; exit \$RC" || RC=$?
         if [ "$RC" -ne 0 ]; then
-          # Same client-hang caveat as kubeadm init above: a joined worker
-          # writes /etc/kubernetes/kubelet.conf, so let the VM decide.
-          if mp_wait 60 exec "${each.key}" -- test -f /etc/kubernetes/kubelet.conf >/dev/null 2>&1; then
-            echo "[k8s] WARN: multipass exec returned $RC (124 = watchdog kill), but ${each.key} has /etc/kubernetes/kubelet.conf — joined, continuing"
+          SENTINEL=$(mp_wait 60 exec "${each.key}" -- sudo cat /run/kubeadm-join.rc 2>/dev/null | tr -d '[:space:]' || true)
+          if [ -n "$SENTINEL" ] && [ "$SENTINEL" != "0" ]; then
+            echo "[k8s] ERROR: kubeadm join itself failed on ${each.key} (join exit $SENTINEL, client exit $RC)" >&2
+            exit 1
+          elif [ -n "$SENTINEL" ]; then
+            echo "[k8s] multipass exec returned $RC (124 = timeout kill, 125 = hung client after the command exited); the join itself exited 0 — continuing"
+          elif mp_wait 60 exec "${each.key}" -- test -f /etc/kubernetes/kubelet.conf >/dev/null 2>&1; then
+            echo "[k8s] WARN: multipass exec returned $RC and no exit-code sentinel was written, but ${each.key} has /etc/kubernetes/kubelet.conf — joined, continuing"
           else
             echo "[k8s] ERROR: kubeadm join failed on ${each.key} (exit $RC)" >&2
             exit 1
