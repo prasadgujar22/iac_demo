@@ -253,7 +253,17 @@ resource "null_resource" "kubeadm_init" {
       for i in $(seq 1 ${floor(var.kubeadm_timeout / 5)}); do
         READY=$(mp exec "${var.master_name}" -- sudo kubectl --kubeconfig /etc/kubernetes/admin.conf \
           get node "${var.master_name}" -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || echo "")
-        [ "$READY" = "True" ] && { echo "[k8s] ${var.master_name} Ready"; exit 0; }
+        if [ "$READY" = "True" ]; then
+          echo "[k8s] ${var.master_name} Ready"
+          # This homelab has no dedicated worker capacity to spare -- the
+          # control-plane node must also run WLS pods, so drop the default
+          # kubeadm NoSchedule taint. Idempotent: already-untainted is a
+          # harmless "not found" from kubectl, swallowed by || true.
+          echo "[k8s] removing control-plane NoSchedule taint from ${var.master_name}"
+          mp exec "${var.master_name}" -- sudo kubectl --kubeconfig /etc/kubernetes/admin.conf \
+            taint nodes "${var.master_name}" node-role.kubernetes.io/control-plane:NoSchedule- 2>/dev/null || true
+          exit 0
+        fi
         echo "[k8s] waiting ($i) for ${var.master_name} Ready: $${READY:-unknown}"
         sleep 5
       done
