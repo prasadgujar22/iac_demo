@@ -32,18 +32,23 @@ variable "domain_image" {
   description = "Model-in-Image domain image, produced by the Packer stage."
   type        = string
 
-  # This default is the source of truth for every run that does NOT build an
-  # image (the Jenkinsfile only passes -var domain_image when BUILD_IMAGE=true),
-  # so it must always name a tag that (a) exists in containerd on every k8s node
-  # -- nothing here pushes to a registry and pods pull IfNotPresent -- and
-  # (b) contains the application.
+  # LAST-RESORT FALLBACK ONLY. A run that does not build an image now reads the
+  # tag off the running server pods (see jenkins/Jenkinsfile), because any tag
+  # hardcoded here goes stale the moment the nodes are rebuilt -- and this one
+  # did: build #45 applied wls-domain-image:9.1 after a teardown had wiped that
+  # tag from the nodes, rolling the domain onto an image nothing could pull.
+  # The introspector went ErrImagePull, Completed never went true, and the
+  # servers kept running the real image, so the application stayed up while the
+  # domain was wedged. Only a build with no server pods to read from -- a fresh
+  # bootstrap -- can still reach this value.
   #
-  # (b) is new and is why 2.6 is no longer valid: every 2.x image predates
-  # baking the WAR into the image, so its WDT model declares no appDeployments.
-  # Rolling the domain onto one now would bring the cluster up healthy and
-  # completely empty -- HTTP 404 on every application URL, with nothing in the
-  # logs that looks like a failure.
-  default = "wls-domain-image:9.1"
+  # It must name a tag that (a) exists in containerd on every k8s node (nothing
+  # here pushes to a registry; pods pull IfNotPresent) and (b) contains the
+  # application. Tag prefixes say who built it: 2.N = homelab-iac, 3.N =
+  # homelab-app. (b) rules out 2.0-2.6, which predate baking the WAR into the
+  # image and would come up healthy and completely empty -- HTTP 404 on every
+  # application URL, with nothing in the logs that looks like a failure.
+  default = "wls-domain-image:2.44"
 }
 
 variable "db_url" {

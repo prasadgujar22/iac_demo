@@ -410,6 +410,32 @@ set -euo pipefail
                         if (s == '20-wls-k8s') {
                             if (env.DOMAIN_IMAGE) {
                                 varArgs += " -var \"domain_image=${env.DOMAIN_IMAGE}\""
+                            } else {
+                                // Nothing built an image this run, so without this
+                                // Terraform falls back to variables.tf's hardcoded
+                                // default -- and a hardcoded tag goes stale the
+                                // moment the nodes are rebuilt. Build #45 did
+                                // exactly that: it applied wls-domain-image:9.1,
+                                // a tag the teardown before #44 had wiped from the
+                                // nodes, rolling the domain onto an image nothing
+                                // could pull. The introspector went ErrImagePull,
+                                // Completed never went true, and the servers kept
+                                // running the real image -- so the app stayed up
+                                // while the domain was quietly wedged.
+                                //
+                                // Ask the cluster what is actually deployed
+                                // instead. The servers' own image is the one tag
+                                // guaranteed to exist on the nodes AND to be the
+                                // one currently serving.
+                                def liveImage = sh(
+                                    script: "kubectl -n wls-domain get pods -l weblogic.serverName -o jsonpath='{.items[0].spec.containers[0].image}' 2>/dev/null || true",
+                                    returnStdout: true).trim()
+                                if (liveImage) {
+                                    echo "[plan] no image built this run -- keeping the one the servers already run: ${liveImage}"
+                                    varArgs += " -var \"domain_image=${liveImage}\""
+                                } else {
+                                    echo "[plan] no image built this run and no server pods to read one from -- falling through to variables.tf's default"
+                                }
                             }
                             // db_url is injected into every server pod so the
                             // application reads the CURRENT database address
