@@ -230,6 +230,37 @@ set -euo pipefail
                       -var "image_tag=2.${BUILD_NUMBER}" \
                       .
                 '''
+                script {
+                    // Carries the freshly-built tag to the Plan stage below,
+                    // which passes it through to 20-wls-k8s so Terraform
+                    // deploys what Packer just built instead of
+                    // variables.tf's stale hardcoded default. Unset when
+                    // BUILD_IMAGE=false, so that stack keeps using its own
+                    // default as before.
+                    env.DOMAIN_IMAGE = "wls-domain-image:2.${env.BUILD_NUMBER}"
+                }
+                // There is no registry in this homelab -- Packer only
+                // produces a local Docker image on this Jenkins host, and
+                // the k8s nodes pull with imagePullPolicy: IfNotPresent
+                // from their own containerd, which never hears about it
+                // otherwise. Distribute it by hand: save once, import onto
+                // every node's containerd. MASTER_VM/WORKER_VMS come from
+                // the 'Start VMs' stage above.
+                sh '''#!/bin/bash
+set -euo pipefail
+                    mp() { if multipass "$@" 2>/dev/null; then return 0; else sudo -n multipass "$@"; fi; }
+                    TAG="wls-domain-image:2.${BUILD_NUMBER}"
+                    TAR="packer/wls-domain-image/.generated/domain-image-2.${BUILD_NUMBER}.tar"
+                    echo "[image] saving $TAG for distribution to k8s nodes"
+                    docker save "$TAG" -o "$TAR"
+                    for vm in "$MASTER_VM" $WORKER_VMS; do
+                        echo "[image] loading $TAG onto $vm"
+                        mp transfer "$TAR" "$vm":/tmp/domain-image.tar
+                        mp exec "$vm" -- sudo ctr -n k8s.io images import /tmp/domain-image.tar
+                        mp exec "$vm" -- rm -f /tmp/domain-image.tar
+                    done
+                    rm -f "$TAR"
+                '''
             }
         }
 
@@ -292,6 +323,11 @@ set -euo pipefail
                             echo "[plan] skipping 20-wls-k8s: k8s API unreachable (cluster not created yet -- re-run with APPLY=true to create it, then this stack can be planned/applied)"
                             return
                         }
+                        // Only 20-wls-k8s takes domain_image, and only when
+                        // this run actually built one (see 'Build domain
+                        // image' above) -- otherwise fall through to
+                        // variables.tf's own default unchanged.
+                        def varArgs = (s == '20-wls-k8s' && env.DOMAIN_IMAGE) ? "-var \"domain_image=${env.DOMAIN_IMAGE}\"" : ''
                         sh """#!/bin/bash
 set -euo pipefail
                             # -reconfigure: the workspace may hold a stale local state file from a
@@ -300,7 +336,7 @@ set -euo pipefail
                             # opaque "Error: input is disabled". The shared backend is the source of
                             # truth, so discard any workspace-local backend config.
                             terraform -chdir=terraform/${s} init -reconfigure -no-color -input=false
-                            terraform -chdir=terraform/${s} plan -no-color -out=tfplan
+                            terraform -chdir=terraform/${s} plan -no-color -out=tfplan ${varArgs}
                         """
                     }
                 }
