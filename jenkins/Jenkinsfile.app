@@ -82,8 +82,8 @@ set -euo pipefail
 set -euo pipefail
                         cd ansible
                         ansible-playbook playbooks/build-app.yml \\
-                          -e "db_mode=\${DB_MODE}" \\
-                          -e "app_repo_version=\${APP_BRANCH}" \\
+                          -e "db_mode=\${DB_MODE:-oracle}" \\
+                          -e "app_repo_version=\${APP_BRANCH:-main}" \\
                           -e "oracle_app_user=\${ORA_APP_USER}" \\
                           -e "oracle_app_password=\${ORA_APP_PASS}"
                     """
@@ -140,7 +140,7 @@ set -euo pipefail
                     # defaults to empty, so omitting it here would strip DB_URL
                     # back out of the pods and roll the domain a second time.
                     DB_URL=""
-                    if [ "\${DB_MODE}" = "oracle" ]; then
+                    if [ "\${DB_MODE:-oracle}" = "oracle" ]; then
                         terraform -chdir=terraform/10-db-multipass init -reconfigure -no-color -input=false >/dev/null 2>&1 || true
                         DB_URL=\$(terraform -chdir=terraform/10-db-multipass output -raw jdbc_url 2>/dev/null || true)
                     fi
@@ -166,8 +166,8 @@ set -euo pipefail
                         # verification (and honours SKIP_VERIFY). Running it
                         # here too would repeat the destructive pod-kill check.
                         ansible-playbook playbooks/deploy-app.yml --skip-tags verify \\
-                          -e "db_mode=\${DB_MODE}" \\
-                          -e "app_repo_version=\${APP_BRANCH}" \\
+                          -e "db_mode=\${DB_MODE:-oracle}" \\
+                          -e "app_repo_version=\${APP_BRANCH:-main}" \\
                           -e "oracle_app_user=\${ORA_APP_USER}" \\
                           -e "oracle_app_password=\${ORA_APP_PASS}"
                     """
@@ -181,7 +181,7 @@ set -euo pipefail
                 sh """#!/bin/bash
 set -euo pipefail
                     cd ansible
-                    ansible-playbook playbooks/site.yml --tags verify -e "db_mode=\${DB_MODE}"
+                    ansible-playbook playbooks/site.yml --tags verify -e "db_mode=\${DB_MODE:-oracle}"
                 """
             }
         }

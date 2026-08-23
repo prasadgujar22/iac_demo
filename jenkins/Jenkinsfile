@@ -57,6 +57,13 @@ pipeline {
         )
     }
 
+    // Shell references to parameters carry defaults (${DB_MODE:-oracle},
+    // ${APP_BRANCH:-main}) because a build can run with the parameters{} block
+    // applied in Groovy but NO matching environment variables injected: that is
+    // exactly the state of every job immediately after jenkins/create-jobs.sh
+    // rewrites its config, and the script's own output tells you to run each job
+    // bare once in that state. params.X resolves from the Jenkinsfile; env.X
+    // does not exist, and `set -u` then aborts the stage on an unbound variable.
     environment {
         REPO_ROOT   = "${WORKSPACE}"
         TF_IN_AUTOMATION = 'true'
@@ -261,8 +268,8 @@ set -euo pipefail
                         # variable defaults to exactly this path.
                         cd ansible
                         ansible-playbook playbooks/build-app.yml \
-                          -e "db_mode=${DB_MODE}" \
-                          -e "app_repo_version=${APP_BRANCH}" \
+                          -e "db_mode=${DB_MODE:-oracle}" \
+                          -e "app_repo_version=${APP_BRANCH:-main}" \
                           -e "oracle_app_user=${ORA_APP_USER}" \
                           -e "oracle_app_password=${ORA_APP_PASS}"
                     '''
@@ -536,8 +543,8 @@ set -euo pipefail
 set -euo pipefail
                             cd ansible
                             ansible-playbook playbooks/site.yml \
-                              -e "db_mode=\${DB_MODE}" \
-                              -e "app_repo_version=\${APP_BRANCH}" \
+                              -e "db_mode=\${DB_MODE:-oracle}" \
+                              -e "app_repo_version=\${APP_BRANCH:-main}" \
                               -e "oracle_sys_password=\${ORA_SYS_PASS}" \
                               -e "oracle_app_user=\${ORA_APP_USER}" \
                               -e "oracle_app_password=\${ORA_APP_PASS}" \
@@ -567,8 +574,8 @@ set -euo pipefail
 set -euo pipefail
                         cd ansible
                         ansible-playbook playbooks/deploy-app.yml \
-                          -e "db_mode=${DB_MODE}" \
-                          -e "app_repo_version=${APP_BRANCH}" \
+                          -e "db_mode=${DB_MODE:-oracle}" \
+                          -e "app_repo_version=${APP_BRANCH:-main}" \
                           -e "oracle_app_user=${ORA_APP_USER}" \
                           -e "oracle_app_password=${ORA_APP_PASS}"
                     '''
@@ -583,7 +590,7 @@ set -euo pipefail
                 sh '''#!/bin/bash
 set -euo pipefail
                     cd ansible
-                    ansible-playbook playbooks/site.yml --tags verify -e "db_mode=${DB_MODE}"
+                    ansible-playbook playbooks/site.yml --tags verify -e "db_mode=${DB_MODE:-oracle}"
                 '''
             }
         }

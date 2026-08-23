@@ -1,0 +1,146 @@
+// ============================================================================
+// Observability teardown.
+//
+// Removes the exporters from every tier that outlives monitoring, then
+// destroys the observability VM and everything on it.
+//
+// A separate job from homelab-observability, mirroring how homelab-teardown is
+// separate from homelab-iac. One job per direction means a destructive action
+// cannot be reached by getting a parameter wrong on a routine deploy -- you
+// have to choose this pipeline, and then type the confirmation.
+//
+// WHAT IS LOST: the Prometheus TSDB lives on the VM being destroyed, so all
+// metric history goes with it. Nothing here backs it up. If the history
+// matters, snapshot it before running this.
+//
+// WHAT IS KEPT: every application tier. This job never touches the database,
+// the cluster, the proxy or the WebLogic domain -- only the agents that were
+// added to them.
+//
+// Requires the 'homelab' SSH agent (see jenkins/README.md).
+// ============================================================================
+
+pipeline {
+    agent { label 'homelab' }
+
+    options {
+        timestamps()
+        ansiColor('xterm')
+        disableConcurrentBuilds()
+        buildDiscarder(logRotator(numToKeepStr: '30'))
+        timeout(time: 30, unit: 'MINUTES')
+    }
+
+    environment {
+        PATH             = "/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:${env.PATH}"
+        TF_IN_AUTOMATION = 'true'
+        TF_INPUT         = '0'
+        ANSIBLE_FORCE_COLOR = 'true'
+        PY_COLORS        = '1'
+        OBS_STACK        = 'terraform/40-obs-multipass'
+    }
+
+    parameters {
+        string(name: 'CONFIRM', defaultValue: '',
+               description: 'Type DESTROY (exactly) to confirm. Anything else aborts before a single change is made. All metric history is lost.')
+        booleanParam(name: 'KEEP_EXPORTERS', defaultValue: false,
+               description: 'Leave node_exporter and the nginx/Oracle collectors installed on the surviving tiers, and destroy only the observability VM. Useful when redeploying monitoring shortly afterwards; the exporters are harmless with nothing scraping them.')
+    }
+
+    stages {
+        stage('Confirm') {
+            steps {
+                script {
+                    // Checked before anything else runs, so a mistyped
+                    // confirmation costs nothing.
+                    if (params.CONFIRM != 'DESTROY') {
+                        error("This job destroys the observability stack and all metric history. It requires CONFIRM=DESTROY (got '${params.CONFIRM}'). Nothing was changed.")
+                    }
+                    echo '[teardown] confirmed'
+                }
+            }
+        }
+
+        stage('Show what will be destroyed') {
+            steps {
+                sh '''#!/bin/bash
+set -uo pipefail
+                    terraform -chdir="${OBS_STACK}" init -reconfigure -no-color -input=false >/dev/null 2>&1 || true
+                    IP=$(terraform -chdir="${OBS_STACK}" output -raw obs_ip 2>/dev/null || true)
+                    if [ -z "$IP" ]; then
+                        echo "[teardown] no observability VM in Terraform state — nothing to destroy"
+                    else
+                        echo "[teardown] will destroy the observability VM at $IP, including its Prometheus TSDB"
+                    fi
+                '''
+            }
+        }
+
+        stage('Remove exporters') {
+            when { expression { !params.KEEP_EXPORTERS } }
+            steps {
+                // Deliberately non-fatal. A tier that is powered off or already
+                // gone must not strand the VM this job exists to destroy --
+                // that is precisely the "reported success while everything kept
+                // running" failure the teardown pipelines were built to avoid,
+                // inverted. The build goes UNSTABLE so the leftover agents are
+                // visible rather than silently forgotten.
+                catchError(buildResult: 'UNSTABLE', stageResult: 'UNSTABLE',
+                           message: 'Could not remove every exporter; continuing to destroy the VM. Re-run this stage, or remove them by hand, once the unreachable tier is back.') {
+                    sh '''#!/bin/bash
+set -euo pipefail
+                        cd ansible
+                        ansible-playbook playbooks/observability.yml -e observability_state=absent
+                    '''
+                }
+            }
+        }
+
+        stage('Destroy') {
+            steps {
+                sh '''#!/bin/bash
+set -euo pipefail
+                    terraform -chdir="${OBS_STACK}" init -reconfigure -no-color -input=false
+                    terraform -chdir="${OBS_STACK}" destroy -auto-approve -no-color
+                '''
+            }
+        }
+
+        stage('Verify it is gone') {
+            steps {
+                // A destroy that reports success while the VM keeps running is
+                // the exact failure this repo's teardown pipeline shipped with
+                // once before. Ask multipass, not Terraform.
+                sh '''#!/bin/bash
+set -uo pipefail
+                    VM=$(terraform -chdir="${OBS_STACK}" output -raw vm_name 2>/dev/null || echo obs)
+                    mp() { if multipass "$@" 2>/dev/null; then return 0; else sudo -n multipass "$@"; fi; }
+                    if mp info "$VM" >/dev/null 2>&1; then
+                        echo "[teardown] FAIL: $VM is still running after terraform destroy reported success" >&2
+                        exit 1
+                    fi
+                    echo "[teardown] confirmed: $VM no longer exists"
+                '''
+            }
+        }
+    }
+
+    post {
+        success {
+            echo '''
+================================================================
+  Observability destroyed
+
+  The VM and its Prometheus history are gone.
+  Every application tier is untouched.
+
+  Redeploy at any time with the homelab-observability job; it
+  rebuilds the VM and reinstalls the exporters from scratch.
+================================================================
+'''
+        }
+        unstable {
+            echo 'The observability VM was destroyed, but some exporters could not be removed — see the Remove exporters stage for which host was unreachable. They are inert with nothing scraping them; re-run this job with CONFIRM=DESTROY once that host is back to clean them up.'
+        }
+    }
+}
