@@ -1,0 +1,28 @@
+---
+# In-cluster metric sources, kept deliberately small.
+#
+# The full kube-prometheus-stack wants 1.5-2.5G and would run Prometheus itself
+# inside the cluster it monitors. This cluster cannot afford that (worker-1 sat
+# at 91% of its memory requests with WebLogic already overcommitted on limits),
+# and monitoring that dies with the thing it monitors is worth little. So only
+# the COLLECTORS live in the cluster -- roughly 130Mi total -- and Prometheus
+# scrapes them from the observability VM.
+kube_metrics_namespace: observability
+
+# Multi-arch images: this host is arm64 and single-arch amd64 images crash the
+# qemu user-mode emulator outright (see the oracle_metrics role).
+kube_node_exporter_image: quay.io/prometheus/node-exporter:v1.8.2
+kube_state_metrics_image: registry.k8s.io/kube-state-metrics/kube-state-metrics:v2.13.0
+
+# node-exporter uses the host's network namespace, so this is a HOST port on
+# every node -- deliberately the same port the standalone VMs use, so every
+# node target in Prometheus looks identical regardless of how it got there.
+kube_node_exporter_port: 9100
+
+# kube-state-metrics is reached from outside the cluster, so it needs a stable
+# NodePort rather than a ClusterIP.
+kube_state_metrics_nodeport: 30808
+
+kube_metrics_manifest: /tmp/kube-metrics.yaml
+
+observability_state: present

@@ -1,0 +1,232 @@
+// ============================================================================
+// Observability: deploy or tear down Prometheus + Grafana and the exporters
+// they read.
+//
+// Separate from homelab-iac on purpose. Monitoring has a different lifecycle
+// from the thing it monitors: it should survive a teardown and rebuild of the
+// application tiers, because that is exactly when its history is worth having.
+// So it owns its own Terraform stack (40-obs-multipass) and its own job, and
+// homelab-teardown does not touch it.
+//
+// ACTION=DEPLOY   creates the VM if absent, installs exporters on every tier,
+//                 and brings up Prometheus and Grafana with vendored dashboards.
+// ACTION=DESTROY  removes the exporters from the tiers that survive, then
+//                 destroys the observability VM.
+//
+// Requires the 'homelab' SSH agent (see jenkins/README.md).
+// ============================================================================
+
+pipeline {
+    agent { label 'homelab' }
+
+    options {
+        timestamps()
+        ansiColor('xterm')
+        disableConcurrentBuilds()
+        buildDiscarder(logRotator(numToKeepStr: '30'))
+        timeout(time: 45, unit: 'MINUTES')
+    }
+
+    environment {
+        // See jenkins/Jenkinsfile: the built-in node's PATH comes from however
+        // Jenkins was launched (a Homebrew LaunchAgent plist that is
+        // regenerated, stripped of overrides, on every `brew services
+        // restart`), so terraform/ansible/kubectl/multipass are invisible
+        // without this.
+        PATH             = "/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:${env.PATH}"
+        TF_IN_AUTOMATION = 'true'
+        TF_INPUT         = '0'
+        ANSIBLE_FORCE_COLOR = 'true'
+        PY_COLORS        = '1'
+        OBS_STACK        = 'terraform/40-obs-multipass'
+    }
+
+    parameters {
+        choice(name: 'ACTION', choices: ['DEPLOY', 'DESTROY'],
+               description: 'DEPLOY = create/refresh the observability stack. DESTROY = remove the exporters from every tier and destroy the observability VM (metric history is lost with it).')
+        booleanParam(name: 'AUTO_APPROVE', defaultValue: true,
+               description: 'Run unattended. Unchecking adds an approval gate before the plan is applied. DESTROY is gated by CONFIRM instead, which AUTO_APPROVE does not bypass.')
+        string(name: 'CONFIRM', defaultValue: '',
+               description: 'ACTION=DESTROY only. Type DESTROY (exactly) to confirm. Anything else aborts.')
+    }
+
+    stages {
+        stage('Preflight') {
+            steps {
+                sh '''#!/bin/bash
+set -euo pipefail
+                    echo "[preflight] tool versions"
+                    terraform version | head -1
+                    ansible --version | head -1
+                    multipass version | head -2 | tr '\\n' ' '; echo
+
+                    # The cluster is a scrape target, not a dependency of the VM
+                    # itself, so an unreachable API is a warning here rather
+                    # than a hard failure: everything except the Kubernetes
+                    # dashboard still works without it.
+                    if kubectl cluster-info >/dev/null 2>&1; then
+                        echo "[preflight] k8s API reachable"
+                    else
+                        echo "[preflight] WARN: k8s API unreachable — cluster metrics will be skipped"
+                    fi
+                '''
+            }
+        }
+
+        stage('Confirm destroy') {
+            when { expression { params.ACTION == 'DESTROY' } }
+            steps {
+                script {
+                    // Deliberately NOT covered by AUTO_APPROVE: that flag means
+                    // "the parameters are the approval", and for a destructive
+                    // action the typed word IS the parameter.
+                    if (params.CONFIRM != 'DESTROY') {
+                        error("ACTION=DESTROY requires CONFIRM=DESTROY (got '${params.CONFIRM}'). Nothing was changed.")
+                    }
+                    echo '[destroy] confirmed'
+                }
+            }
+        }
+
+        stage('Plan') {
+            when { expression { params.ACTION == 'DEPLOY' } }
+            steps {
+                sh '''#!/bin/bash
+set -euo pipefail
+                    terraform -chdir="${OBS_STACK}" init -reconfigure -no-color -input=false
+                    terraform -chdir="${OBS_STACK}" plan -no-color -input=false -out=tfplan.obs
+                '''
+            }
+        }
+
+        stage('Approve apply') {
+            when {
+                allOf {
+                    expression { params.ACTION == 'DEPLOY' }
+                    expression { !params.AUTO_APPROVE }
+                }
+            }
+            steps {
+                script {
+                    timeout(time: 15, unit: 'MINUTES') {
+                        input message: 'Apply the observability stack?', ok: 'Apply'
+                    }
+                }
+            }
+        }
+
+        stage('Apply') {
+            when { expression { params.ACTION == 'DEPLOY' } }
+            steps {
+                sh '''#!/bin/bash
+set -euo pipefail
+                    terraform -chdir="${OBS_STACK}" apply -no-color tfplan.obs
+                    echo "[obs] VM ready at $(terraform -chdir="${OBS_STACK}" output -raw obs_ip)"
+                '''
+            }
+        }
+
+        stage('Configure') {
+            when { expression { params.ACTION == 'DEPLOY' } }
+            steps {
+                // Masked by the credentials binding, so the password cannot
+                // reach the console log even though Jenkins echoes the script.
+                withCredentials([usernamePassword(credentialsId: 'grafana-admin',
+                                                  usernameVariable: 'GF_USER',
+                                                  passwordVariable: 'GF_PASS')]) {
+                    sh '''#!/bin/bash
+set -euo pipefail
+                        cd ansible
+                        ansible-playbook playbooks/observability.yml -e observability_state=present -e grafana_admin_user="$GF_USER" -e grafana_admin_password="$GF_PASS"
+                    '''
+                }
+            }
+        }
+
+        stage('Verify') {
+            when { expression { params.ACTION == 'DEPLOY' } }
+            steps {
+                sh '''#!/bin/bash
+set -euo pipefail
+                    IP=$(terraform -chdir="${OBS_STACK}" output -raw obs_ip)
+                    PROM=$(terraform -chdir="${OBS_STACK}" output -raw prometheus_port)
+                    GRAF=$(terraform -chdir="${OBS_STACK}" output -raw grafana_port)
+
+                    echo "[verify] Prometheus targets"
+                    # Reachability from the HOST, not just from the VM: the
+                    # roles already proved localhost works, and a bind-address
+                    # mistake looks identical until something external tries.
+                    DOWN=$(curl -sf "http://$IP:$PROM/api/v1/targets?state=active" | python3 -c "
+import sys, json
+t = json.load(sys.stdin)['data']['activeTargets']
+bad = [x for x in t if x['health'] != 'up']
+for b in bad:
+    print('  DOWN %s %s: %s' % (b['labels'].get('job'), b['scrapeUrl'], b.get('lastError', '')))
+print('TOTAL %d DOWN %d' % (len(t), len(bad)))
+")
+                    echo "$DOWN"
+                    echo "$DOWN" | grep -q "DOWN 0$" || { echo "[verify] FAIL: some scrape targets are down" >&2; exit 1; }
+
+                    echo "[verify] Grafana health"
+                    curl -sf "http://$IP:$GRAF/api/health" | grep -q '"database": *"ok"' || { echo "[verify] FAIL: Grafana unhealthy" >&2; exit 1; }
+                    echo "[verify] PASS"
+                '''
+            }
+        }
+
+        stage('Remove exporters') {
+            when { expression { params.ACTION == 'DESTROY' } }
+            steps {
+                // Runs BEFORE the VM is destroyed, and targets the tiers that
+                // outlive it: leaving node_exporter units and an Oracle timer
+                // running on VMs nothing scrapes any more is exactly the kind
+                // of debris that makes a later "why is this port open?" hard.
+                sh '''#!/bin/bash
+set -euo pipefail
+                    cd ansible
+                    ansible-playbook playbooks/observability.yml -e observability_state=absent
+                '''
+            }
+        }
+
+        stage('Destroy') {
+            when { expression { params.ACTION == 'DESTROY' } }
+            steps {
+                sh '''#!/bin/bash
+set -euo pipefail
+                    terraform -chdir="${OBS_STACK}" init -reconfigure -no-color -input=false
+                    terraform -chdir="${OBS_STACK}" destroy -auto-approve -no-color
+                    echo "[obs] observability VM destroyed; metric history is gone with it"
+                '''
+            }
+        }
+    }
+
+    post {
+        success {
+            script {
+                if (params.ACTION == 'DEPLOY') {
+                    def ip   = sh(script: 'terraform -chdir="${OBS_STACK}" output -raw obs_ip 2>/dev/null || true', returnStdout: true).trim()
+                    def graf = sh(script: 'terraform -chdir="${OBS_STACK}" output -raw grafana_port 2>/dev/null || echo 3000', returnStdout: true).trim()
+                    def prom = sh(script: 'terraform -chdir="${OBS_STACK}" output -raw prometheus_port 2>/dev/null || echo 9090', returnStdout: true).trim()
+                    echo """
+================================================================
+  Observability deployed
+
+  GRAFANA:     http://${ip}:${graf}
+    dashboards: Fleet / nginx / Kubernetes / Oracle (Homelab folder)
+    login:      the grafana-admin credential
+
+  PROMETHEUS:  http://${ip}:${prom}/targets
+================================================================
+"""
+                } else {
+                    echo 'Observability torn down. The application tiers were not touched.'
+                }
+            }
+        }
+        failure {
+            echo 'Observability pipeline failed. If it stopped in Configure, the Ansible play names the host and role; if in Verify, the Prometheus targets page on the obs VM shows which scrape is failing and why.'
+        }
+    }
+}

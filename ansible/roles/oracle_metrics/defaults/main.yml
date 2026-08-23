@@ -1,0 +1,28 @@
+---
+# Oracle metrics via node_exporter's textfile collector rather than a dedicated
+# exporter, because on this host there is no dedicated exporter to run:
+#
+#   * iamseth/oracledb_exporter publishes amd64 ONLY. This VM is arm64, and
+#     running amd64 under qemu user-mode emulation on Apple Silicon crashes the
+#     emulator itself -- the same wall that forced oracle-xe -> oracle-free.
+#   * Oracle's own container-registry.oracle.com/database/observability-exporter
+#     needs an authenticated pull with license acceptance, which an unattended
+#     pipeline cannot do.
+#
+# So a timer runs sqlplus INSIDE the existing (arm64, already running) database
+# container and writes a .prom file that node_exporter already serves. No new
+# image, no new port, no architecture risk -- and no credentials: sqlplus
+# authenticates as SYSDBA through the OS inside the container, so nothing here
+# stores or transports a database password.
+oracle_metrics_script: /usr/local/bin/oracle_metrics.sh
+oracle_metrics_interval: 30s
+
+# Must match the oracle_xe role: this is the container the script exec's into.
+oracle_container_name: oracle-xe
+oracle_app_user: customer_app
+oracle_pdb: XEPDB1
+
+# Written into node_exporter's textfile directory, so the two roles must agree.
+node_exporter_textfile_dir: /var/lib/node_exporter/textfile
+
+observability_state: present

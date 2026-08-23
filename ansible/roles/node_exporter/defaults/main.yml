@@ -1,0 +1,22 @@
+---
+# Pinned, not "latest": an exporter that silently changes metric names between
+# runs breaks every dashboard built on it, and a homelab has no staging tier to
+# notice that in.
+node_exporter_version: "1.8.2"
+
+# Where the release tarballs come from. Overridable so an air-gapped host can
+# point at a mirror.
+node_exporter_base_url: "https://github.com/prometheus/node_exporter/releases/download"
+
+node_exporter_port: 9100
+node_exporter_user: node_exporter
+node_exporter_bin: /usr/local/bin/node_exporter
+
+# The textfile collector is how DB metrics reach Prometheus on this host: no
+# arm64 Oracle exporter image exists (see the oracle_metrics role), so a timer
+# writes .prom files here and node_exporter serves them alongside host metrics.
+node_exporter_textfile_dir: /var/lib/node_exporter/textfile
+
+# present | absent. The observability pipeline's DESTROY action sets absent, so
+# tearing down monitoring leaves no agents behind on the tiers it watched.
+observability_state: present

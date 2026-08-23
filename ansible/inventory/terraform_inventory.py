@@ -49,6 +49,7 @@ SSH_PRIVATE_KEY_FILE = os.path.expanduser(
 GENERATED = [
     os.path.join(REPO_ROOT, "terraform", "10-db-multipass", ".generated", "db_inventory.yaml"),
     os.path.join(REPO_ROOT, "terraform", "30-nginx-multipass", ".generated", "nginx_inventory.yaml"),
+    os.path.join(REPO_ROOT, "terraform", "40-obs-multipass", ".generated", "obs_inventory.yaml"),
 ]
 
 
@@ -56,7 +57,7 @@ def base_inventory():
     """Static topology that never depends on Terraform state."""
     return {
         "_meta": {"hostvars": {}},
-        "all": {"children": ["control", "db", "nginx", "ungrouped"]},
+        "all": {"children": ["control", "db", "nginx", "obs", "ungrouped"]},
         # The host itself: runs socat bridges, kubectl and the Maven build.
         "control": {
             "hosts": ["localhost"],
@@ -64,6 +65,10 @@ def base_inventory():
         },
         "db": {"hosts": []},
         "nginx": {"hosts": []},
+        # Empty unless the observability stack has been deployed. Every play
+        # that targets it must tolerate that: the application tiers are
+        # expected to run with no monitoring at all.
+        "obs": {"hosts": []},
     }
 
 
@@ -133,6 +138,7 @@ def merge_from_shared_state(inv, group, host_key, host_default, build_hostvars):
 GROUP_STACKS = {
     "db": "10-db-multipass",
     "nginx": "30-nginx-multipass",
+    "obs": "40-obs-multipass",
 }
 
 
@@ -159,6 +165,17 @@ def build():
             "proxy_internal_ip": o.get("proxy_internal_ip"),
             "proxy_lan_ip": o.get("proxy_lan_ip"),
             "proxy_listen_port": o.get("proxy_listen_port", 80),
+        },
+    )
+    merge_from_shared_state(
+        inv, "obs", "vm_name", "obs",
+        lambda o: {
+            "ansible_host": o.get("obs_ip"),
+            "ansible_user": "ubuntu",
+            "ansible_ssh_private_key_file": SSH_PRIVATE_KEY_FILE,
+            "obs_ip": o.get("obs_ip"),
+            "prometheus_port": o.get("prometheus_port", 9090),
+            "grafana_port": o.get("grafana_port", 3000),
         },
     )
 

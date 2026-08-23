@@ -1,0 +1,12 @@
+# Managed by Ansible (oracle_metrics role) — local edits are overwritten.
+[Unit]
+Description=Collect Oracle metrics every {{ oracle_metrics_interval }}
+
+[Timer]
+OnBootSec=30s
+OnUnitActiveSec={{ oracle_metrics_interval }}
+AccuracySec=1s
+Unit=oracle_metrics.service
+
+[Install]
+WantedBy=timers.target

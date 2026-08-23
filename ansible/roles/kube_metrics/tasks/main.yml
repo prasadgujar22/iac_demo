@@ -1,0 +1,87 @@
+---
+# Runs on the control host (localhost), which is where kubectl and the
+# kubeconfig live. Everything here is applied INTO the cluster.
+
+- name: Remove in-cluster metric collectors
+  when: observability_state == 'absent'
+  block:
+    # Deleting the namespace removes the DaemonSet, Deployment, Service,
+    # ServiceAccounts and token with it; the ClusterRoles and bindings are
+    # cluster-scoped and have to go separately.
+    - name: Delete the observability namespace
+      ansible.builtin.command: >-
+        kubectl delete namespace {{ kube_metrics_namespace }} --ignore-not-found --wait=false
+      changed_when: true
+      failed_when: false
+
+    - name: Delete cluster-scoped RBAC
+      ansible.builtin.command: >-
+        kubectl delete {{ item.kind }} {{ item.name }} --ignore-not-found
+      changed_when: true
+      failed_when: false
+      loop:
+        - {kind: clusterrole, name: kube-state-metrics}
+        - {kind: clusterrolebinding, name: kube-state-metrics}
+        - {kind: clusterrole, name: prometheus-scraper}
+        - {kind: clusterrolebinding, name: prometheus-scraper}
+
+- name: Deploy in-cluster metric collectors
+  when: observability_state == 'present'
+  block:
+    - name: Render the manifest
+      ansible.builtin.template:
+        src: kube-metrics.yaml.j2
+        dest: "{{ kube_metrics_manifest }}"
+        mode: "0600"
+
+    - name: Apply the manifest
+      ansible.builtin.command: "kubectl apply -f {{ kube_metrics_manifest }}"
+      register: kube_apply
+      changed_when: "'created' in kube_apply.stdout or 'configured' in kube_apply.stdout"
+
+    - name: Wait for kube-state-metrics to be available
+      ansible.builtin.command: >-
+        kubectl -n {{ kube_metrics_namespace }} rollout status deployment/kube-state-metrics --timeout=180s
+      changed_when: false
+
+    # A DaemonSet reports ready per node; on a cluster this small a single
+    # unschedulable node means half the fleet has no host metrics at all.
+    - name: Wait for node-exporter on every node
+      ansible.builtin.command: >-
+        kubectl -n {{ kube_metrics_namespace }} rollout status daemonset/node-exporter --timeout=180s
+      changed_when: false
+
+    # The token is created asynchronously by the token controller, so it can be
+    # absent for a moment after the Secret itself exists.
+    - name: Read the scraper's service account token
+      ansible.builtin.command: >-
+        kubectl -n {{ kube_metrics_namespace }} get secret prometheus-scraper-token
+        -o jsonpath={.data.token}
+      register: scraper_token
+      changed_when: false
+      retries: 12
+      delay: 5
+      until: scraper_token.stdout | length > 0
+
+    - name: Collect the cluster's node addresses
+      ansible.builtin.command: >-
+        kubectl get nodes -o jsonpath={range.items[*]}{.status.addresses[?(@.type=="InternalIP")].address}{"\n"}{end}
+      register: k8s_nodes
+      changed_when: false
+
+    # Published as facts on this host so the prometheus role can reach them
+    # through hostvars['localhost'] when it templates the scrape config on the
+    # observability VM.
+    - name: Publish cluster scrape facts
+      ansible.builtin.set_fact:
+        k8s_scrape_token: "{{ scraper_token.stdout | b64decode }}"
+        k8s_node_ips: "{{ k8s_nodes.stdout_lines | select('match', '^[0-9]') | list }}"
+        kube_state_metrics_endpoint: >-
+          {{ (k8s_nodes.stdout_lines | select('match', '^[0-9]') | list | first)
+             ~ ':' ~ kube_state_metrics_nodeport }}
+
+    - name: Report what will be scraped
+      ansible.builtin.debug:
+        msg: >-
+          Cluster targets: nodes={{ k8s_node_ips | join(', ') }}
+          kube-state-metrics={{ kube_state_metrics_endpoint }}

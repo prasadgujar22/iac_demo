@@ -1,0 +1,129 @@
+---
+- name: Remove Prometheus
+  when: observability_state == 'absent'
+  block:
+    - name: Stop and disable Prometheus
+      ansible.builtin.systemd:
+        name: prometheus
+        state: stopped
+        enabled: false
+      become: true
+      failed_when: false
+
+    - name: Remove the Prometheus unit and configuration
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      become: true
+      loop:
+        - /etc/systemd/system/prometheus.service
+        - "{{ prometheus_config_dir }}"
+
+    - name: Reload systemd after removing the unit
+      ansible.builtin.systemd:
+        daemon_reload: true
+      become: true
+
+    # The TSDB is deliberately NOT deleted. Destroying the observability VM
+    # takes it anyway, but on a re-deploy over an existing VM the history is
+    # the whole point of having collected it.
+    - name: Report that metric history was kept
+      ansible.builtin.debug:
+        msg: "Prometheus removed. TSDB left at {{ prometheus_data_dir }}; destroying the VM is what discards it."
+
+- name: Install Prometheus
+  when: observability_state == 'present'
+  block:
+    - name: Create the configuration directory
+      ansible.builtin.file:
+        path: "{{ prometheus_config_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+      become: true
+
+    # Owned by the image's uid, not root: prom/prometheus runs as nobody and
+    # exits on startup if it cannot write its own TSDB.
+    - name: Create the data directory
+      ansible.builtin.file:
+        path: "{{ prometheus_data_dir }}"
+        state: directory
+        owner: "{{ prometheus_uid }}"
+        group: "{{ prometheus_uid }}"
+        mode: "0755"
+      become: true
+
+    - name: Install the Kubernetes scrape token
+      ansible.builtin.copy:
+        content: "{{ hostvars['localhost'].k8s_scrape_token }}"
+        dest: "{{ prometheus_config_dir }}/k8s-token"
+        owner: "{{ prometheus_uid }}"
+        group: "{{ prometheus_uid }}"
+        mode: "0600"
+      become: true
+      when: hostvars['localhost'].k8s_scrape_token | default('') | length > 0
+      notify: restart prometheus
+
+    - name: Install the scrape configuration
+      ansible.builtin.template:
+        src: prometheus.yml.j2
+        dest: "{{ prometheus_config_dir }}/prometheus.yml"
+        owner: root
+        group: root
+        mode: "0644"
+      become: true
+      notify: restart prometheus
+
+    - name: Install the Prometheus unit
+      ansible.builtin.template:
+        src: prometheus.service.j2
+        dest: /etc/systemd/system/prometheus.service
+        owner: root
+        group: root
+        mode: "0644"
+      become: true
+      notify: restart prometheus
+
+    - name: Enable and start Prometheus
+      ansible.builtin.systemd:
+        name: prometheus
+        state: started
+        enabled: true
+        daemon_reload: true
+      become: true
+
+    - name: Apply any pending restart before probing
+      ansible.builtin.meta: flush_handlers
+
+    # The first start pulls a ~250MB image, so allow generously here.
+    - name: Wait for Prometheus to answer
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ prometheus_port }}/-/ready"
+        status_code: 200
+      register: prom_ready
+      retries: 30
+      delay: 10
+      until: prom_ready is succeeded
+
+    # "Prometheus is up" says nothing about whether it can actually SEE
+    # anything. Ask it which targets are down and name them: a silently empty
+    # dashboard is the failure this whole role exists to avoid.
+    - name: Check every scrape target is up
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ prometheus_port }}/api/v1/targets?state=active"
+        return_content: true
+      register: prom_targets
+      retries: 12
+      delay: 10
+      until:
+        - prom_targets is succeeded
+        - (prom_targets.content | from_json).data.activeTargets
+          | rejectattr('health', 'equalto', 'up') | list | length == 0
+
+    - name: Report the scrape targets
+      ansible.builtin.debug:
+        msg: >-
+          {{ (prom_targets.content | from_json).data.activeTargets
+             | map(attribute='labels.job') | unique | list | join(', ') }}
+          ({{ (prom_targets.content | from_json).data.activeTargets | length }} targets, all up)

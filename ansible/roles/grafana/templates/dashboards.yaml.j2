@@ -1,0 +1,16 @@
+# Managed by Ansible (grafana role) — local edits are overwritten.
+apiVersion: 1
+
+providers:
+  - name: homelab
+    orgId: 1
+    folder: Homelab
+    type: file
+    # Edits made in the UI are kept until the next provision run, which
+    # rewrites them from the repo. The repo is the source of truth.
+    disableDeletion: false
+    allowUiUpdates: true
+    updateIntervalSeconds: 30
+    options:
+      path: /var/lib/grafana/dashboards
+      foldersFromFilesStructure: false

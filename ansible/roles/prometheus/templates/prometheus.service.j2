@@ -1,0 +1,31 @@
+# Managed by Ansible (prometheus role) — local edits are overwritten.
+#
+# A systemd unit wrapping `docker run` rather than a compose file: this gives
+# restart-on-failure, start-on-boot and `journalctl -u prometheus` with nothing
+# else installed on the VM.
+[Unit]
+Description=Prometheus
+After=docker.service
+Requires=docker.service
+
+[Service]
+Restart=always
+RestartSec=10
+# --rm plus an explicit pre-stop removal: a container left behind by an
+# unclean shutdown would make the next start fail on a name conflict.
+ExecStartPre=-/usr/bin/docker rm -f prometheus
+ExecStart=/usr/bin/docker run --rm --name prometheus \
+  --user {{ prometheus_uid }} \
+  -p {{ prometheus_port }}:{{ prometheus_port }} \
+  -v {{ prometheus_config_dir }}:/etc/prometheus:ro \
+  -v {{ prometheus_data_dir }}:/prometheus \
+  {{ prometheus_image }} \
+  --config.file=/etc/prometheus/prometheus.yml \
+  --storage.tsdb.path=/prometheus \
+  --storage.tsdb.retention.time={{ prometheus_retention }} \
+  --web.listen-address=:{{ prometheus_port }} \
+  --web.enable-lifecycle
+ExecStop=/usr/bin/docker stop prometheus
+
+[Install]
+WantedBy=multi-user.target

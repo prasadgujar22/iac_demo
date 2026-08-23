@@ -1,0 +1,26 @@
+---
+# Pinned and arm64-verified. `latest` on a metrics store is a bad trade: an
+# unattended pull can change storage format or flag names on a restart nobody
+# was watching.
+prometheus_image: prom/prometheus:v3.14.0
+prometheus_port: 9090
+
+prometheus_config_dir: /etc/prometheus
+prometheus_data_dir: /var/lib/prometheus
+
+# 15 days at ~15s across this many targets is well under the 20G disk, and is
+# long enough to still have the data when someone asks "what happened on
+# Tuesday".
+prometheus_retention: 15d
+prometheus_scrape_interval: 15s
+
+# The image runs as nobody; the data directory has to be owned by the same uid
+# or Prometheus exits immediately with a permissions error on its own TSDB.
+prometheus_uid: 65534
+
+# Ports the scrape targets listen on. Must match the exporter roles.
+node_exporter_port: 9100
+nginx_exporter_port: 9113
+kubelet_port: 10250
+
+observability_state: present

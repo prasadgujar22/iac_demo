@@ -1,0 +1,73 @@
+---
+# Deploy (or remove) the observability stack.
+#
+# Both directions live in one playbook, selected by observability_state
+# (present|absent), because the two differ only in what each role does — the
+# ORDER is the same either way, and keeping one file means a role added here
+# cannot be forgotten in the teardown path.
+#
+# Play order is load-bearing for a deploy:
+#   1. the cluster play publishes the scrape token and node addresses as facts
+#   2. the exporters must exist before Prometheus asserts that every target is up
+#   3. Prometheus must be up before Grafana provisions a datasource pointing at it
+
+- name: Deploy in-cluster metric collectors
+  # kubectl and the kubeconfig live on the control host, not in the cluster.
+  hosts: control
+  gather_facts: false
+  tags: [observability, kubernetes]
+  roles:
+    - role: kube_metrics
+      observability_state: "{{ observability_state | default('present') }}"
+
+- name: Install host metrics on every non-Kubernetes VM
+  # The k8s nodes are covered by the DaemonSet above; these three are not in
+  # any cluster and need the systemd unit instead.
+  hosts: obs:db:nginx
+  gather_facts: true
+  tags: [observability, node]
+  roles:
+    - role: node_exporter
+      observability_state: "{{ observability_state | default('present') }}"
+
+- name: Install nginx metrics
+  hosts: nginx
+  gather_facts: true
+  tags: [observability, nginx]
+  roles:
+    - role: nginx_metrics
+      observability_state: "{{ observability_state | default('present') }}"
+
+- name: Install Oracle metrics
+  hosts: db
+  gather_facts: true
+  tags: [observability, oracle]
+  roles:
+    - role: oracle_metrics
+      observability_state: "{{ observability_state | default('present') }}"
+
+- name: Install Prometheus and Grafana
+  # Empty until the 40-obs-multipass stack has been applied, which is exactly
+  # what should happen: with no observability VM there is nowhere to put these,
+  # and the exporters above are harmless on their own.
+  hosts: obs
+  gather_facts: true
+  tags: [observability, obs]
+  roles:
+    - role: prometheus
+      observability_state: "{{ observability_state | default('present') }}"
+    - role: grafana
+      observability_state: "{{ observability_state | default('present') }}"
+
+- name: Report where to look
+  hosts: obs
+  gather_facts: false
+  tags: [observability, obs]
+  tasks:
+    - name: Print the entry points
+      when: observability_state | default('present') == 'present'
+      ansible.builtin.debug:
+        msg:
+          - "Grafana:    http://{{ ansible_host }}:{{ grafana_port | default(3000) }}  (admin / the grafana-admin credential)"
+          - "Prometheus: http://{{ ansible_host }}:{{ prometheus_port | default(9090) }}/targets"
+          - "Dashboards: Fleet, nginx, Kubernetes, Oracle — in the Homelab folder"

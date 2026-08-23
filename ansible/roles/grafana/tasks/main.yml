@@ -1,0 +1,142 @@
+---
+- name: Remove Grafana
+  when: observability_state == 'absent'
+  block:
+    - name: Stop and disable Grafana
+      ansible.builtin.systemd:
+        name: grafana
+        state: stopped
+        enabled: false
+      become: true
+      failed_when: false
+
+    - name: Remove Grafana unit, provisioning and dashboards
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      become: true
+      loop:
+        - /etc/systemd/system/grafana.service
+        - "{{ grafana_config_dir }}"
+        - "{{ grafana_dashboard_dir }}"
+
+    - name: Reload systemd after removing the unit
+      ansible.builtin.systemd:
+        daemon_reload: true
+      become: true
+
+- name: Install Grafana
+  when: observability_state == 'present'
+  block:
+    - name: Warn when the admin password is still the default
+      ansible.builtin.debug:
+        msg: >-
+          WARNING: Grafana admin password is still 'admin'. The pipeline passes
+          a real one from the grafana-admin Jenkins credential; a hand-run of
+          this playbook should set -e grafana_admin_password=...
+      when: grafana_admin_password == 'admin'
+
+    - name: Create Grafana directories
+      ansible.builtin.file:
+        path: "{{ item.path }}"
+        state: directory
+        owner: "{{ item.owner }}"
+        group: "{{ item.owner }}"
+        mode: "0755"
+      become: true
+      loop:
+        - {path: "{{ grafana_config_dir }}/provisioning/datasources", owner: root}
+        - {path: "{{ grafana_config_dir }}/provisioning/dashboards", owner: root}
+        - {path: "{{ grafana_dashboard_dir }}", owner: root}
+        # Grafana's own SQLite database lives here and it writes as uid 472.
+        - {path: "{{ grafana_data_dir }}", owner: "{{ grafana_uid }}"}
+
+    - name: Install the datasource provisioning file
+      ansible.builtin.template:
+        src: datasource.yaml.j2
+        dest: "{{ grafana_config_dir }}/provisioning/datasources/prometheus.yaml"
+        owner: root
+        group: root
+        mode: "0644"
+      become: true
+      notify: restart grafana
+
+    - name: Install the dashboard provider
+      ansible.builtin.template:
+        src: dashboards.yaml.j2
+        dest: "{{ grafana_config_dir }}/provisioning/dashboards/homelab.yaml"
+        owner: root
+        group: root
+        mode: "0644"
+      become: true
+      notify: restart grafana
+
+    # Vendored in the repo rather than imported by ID from grafana.com: the
+    # deploy then needs no internet at run time, the panels are reviewed with
+    # the code that produces the metrics they read, and nothing silently
+    # changes underneath a rebuild.
+    - name: Install the dashboards
+      ansible.builtin.copy:
+        src: dashboards/
+        dest: "{{ grafana_dashboard_dir }}/"
+        owner: root
+        group: root
+        mode: "0644"
+      become: true
+      notify: restart grafana
+
+    - name: Install the Grafana unit
+      ansible.builtin.template:
+        src: grafana.service.j2
+        dest: /etc/systemd/system/grafana.service
+        owner: root
+        group: root
+        mode: "0644"
+      become: true
+      notify: restart grafana
+
+    - name: Enable and start Grafana
+      ansible.builtin.systemd:
+        name: grafana
+        state: started
+        enabled: true
+        daemon_reload: true
+      become: true
+
+    - name: Apply any pending restart before probing
+      ansible.builtin.meta: flush_handlers
+
+    - name: Wait for Grafana to answer
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ grafana_port }}/api/health"
+        return_content: true
+      register: gf_health
+      retries: 30
+      delay: 10
+      until:
+        - gf_health is succeeded
+        - (gf_health.content | from_json).database == 'ok'
+
+    # Provisioning failures do NOT stop Grafana: it starts happily and simply
+    # serves nothing. Ask it what it actually loaded.
+    - name: Verify every dashboard was provisioned
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ grafana_port }}/api/search?type=dash-db"
+        user: "{{ grafana_admin_user }}"
+        password: "{{ grafana_admin_password }}"
+        force_basic_auth: true
+        return_content: true
+      register: gf_dashboards
+      retries: 10
+      delay: 6
+      until:
+        - gf_dashboards is succeeded
+        - (gf_dashboards.content | from_json) | map(attribute='uid') | select('in', expected_dashboard_uids) | list | length == expected_dashboard_uids | length
+      vars:
+        expected_dashboard_uids: [homelab-fleet, homelab-nginx, homelab-kubernetes, homelab-oracle]
+
+    - name: Report the provisioned dashboards
+      ansible.builtin.debug:
+        msg: >-
+          Grafana serving {{ (gf_dashboards.content | from_json) | length }} dashboards:
+          {{ (gf_dashboards.content | from_json) | map(attribute='title') | join(' | ') }}

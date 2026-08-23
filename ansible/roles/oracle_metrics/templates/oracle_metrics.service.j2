@@ -1,0 +1,12 @@
+# Managed by Ansible (oracle_metrics role) — local edits are overwritten.
+[Unit]
+Description=Collect Oracle metrics into node_exporter's textfile collector
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+ExecStart={{ oracle_metrics_script }}
+# The script always writes a file (oracle_up 0 on failure), so a non-zero exit
+# means the SCRIPT broke, not the database.
+TimeoutStartSec=60

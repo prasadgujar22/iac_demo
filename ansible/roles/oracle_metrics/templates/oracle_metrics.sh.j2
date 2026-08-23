@@ -1,0 +1,87 @@
+#!/bin/bash
+# Managed by Ansible (oracle_metrics role) — local edits are overwritten.
+#
+# Writes Oracle metrics where node_exporter's textfile collector will serve
+# them. See the role's defaults for why this is a script and not an exporter.
+set -uo pipefail
+
+CONTAINER="{{ oracle_container_name }}"
+OUT="{{ node_exporter_textfile_dir }}/oracle.prom"
+# Same directory, so the final move is atomic. node_exporter reads this
+# directory on every scrape, and a half-written file is a parse error that
+# discards EVERY metric in it -- including the host metrics, if it hit mid-read.
+TMP="$(mktemp "${OUT}.XXXXXX")"
+trap 'rm -f "$TMP"' EXIT
+
+START=$(date +%s.%N)
+
+emit_header() {
+    cat >>"$TMP" <<'HDR'
+# HELP oracle_up Whether the collector could query the database (1) or not (0).
+# TYPE oracle_up gauge
+# HELP oracle_instance_uptime_seconds Seconds since the instance started.
+# TYPE oracle_instance_uptime_seconds gauge
+# HELP oracle_sessions_total Sessions currently connected.
+# TYPE oracle_sessions_total gauge
+# HELP oracle_sessions_active Sessions in ACTIVE status.
+# TYPE oracle_sessions_active gauge
+# HELP oracle_pga_allocated_bytes Total PGA allocated.
+# TYPE oracle_pga_allocated_bytes gauge
+# HELP oracle_sga_total_bytes Total SGA size.
+# TYPE oracle_sga_total_bytes gauge
+# HELP oracle_tablespace_used_bytes Bytes consumed by segments per tablespace.
+# TYPE oracle_tablespace_used_bytes gauge
+# HELP oracle_tablespace_max_bytes Maximum bytes each tablespace can grow to.
+# TYPE oracle_tablespace_max_bytes gauge
+# HELP oracle_app_rows_total Rows in the application's table.
+# TYPE oracle_app_rows_total gauge
+# HELP oracle_scrape_duration_seconds How long this collection took.
+# TYPE oracle_scrape_duration_seconds gauge
+HDR
+}
+
+# v$ views are unquoted on purpose: this heredoc is quoted, so the shell leaves
+# $session and friends alone and sqlplus receives them intact.
+read -r -d '' SQL <<'SQLEOF'
+set heading off feedback off pagesize 0 linesize 32767 trimspool on echo off verify off
+whenever sqlerror exit failure
+select 'oracle_instance_uptime_seconds ' || round((sysdate - startup_time) * 86400) from v$instance;
+select 'oracle_sessions_total ' || count(*) from v$session;
+select 'oracle_sessions_active ' || count(*) from v$session where status = 'ACTIVE';
+select 'oracle_pga_allocated_bytes ' || round(value) from v$pgastat where name = 'total PGA allocated';
+select 'oracle_sga_total_bytes ' || round(sum(value)) from v$sga;
+alter session set container={{ oracle_pdb }};
+select 'oracle_tablespace_used_bytes{tablespace="' || tablespace_name || '"} ' || sum(bytes) from dba_segments group by tablespace_name;
+select 'oracle_tablespace_max_bytes{tablespace="' || tablespace_name || '"} ' || sum(decode(maxbytes, 0, bytes, maxbytes)) from dba_data_files group by tablespace_name;
+select 'oracle_app_rows_total{table="CUSTOMER_ONBOARDING"} ' || count(*) from {{ oracle_app_user }}.customer_onboarding;
+exit
+SQLEOF
+
+emit_header
+
+# `docker exec -i` because the SQL arrives on stdin. sqlplus authenticates as
+# SYSDBA through the OS inside the container, so no password is involved.
+if OUTPUT=$(printf '%s\n' "$SQL" | docker exec -i "$CONTAINER" sqlplus -S / as sysdba 2>&1); then
+    # Keep only our own lines. sqlplus interleaves banners, blank lines and
+    # "Session altered." noise that would otherwise corrupt the file.
+    printf '%s\n' "$OUTPUT" | grep '^oracle_[a-z_]* \|^oracle_[a-z_]*{' >>"$TMP"
+
+    if grep -q '^oracle_instance_uptime_seconds ' "$TMP"; then
+        echo "oracle_up 1" >>"$TMP"
+    else
+        # Connected but returned nothing recognisable: still a failure, and one
+        # worth distinguishing from a refused connection when reading the logs.
+        echo "oracle_up 0" >>"$TMP"
+        echo "oracle_metrics: query produced no metrics; sqlplus said: ${OUTPUT}" >&2
+    fi
+else
+    echo "oracle_up 0" >>"$TMP"
+    echo "oracle_metrics: sqlplus failed: ${OUTPUT}" >&2
+fi
+
+END=$(date +%s.%N)
+echo "oracle_scrape_duration_seconds $(echo "$END $START" | awk '{printf "%.3f", $1 - $2}')" >>"$TMP"
+
+chmod 0644 "$TMP"
+mv "$TMP" "$OUT"
+trap - EXIT

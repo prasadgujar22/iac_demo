@@ -1,0 +1,138 @@
+---
+# Host-level metrics for every VM that is not a Kubernetes node. The k8s nodes
+# get theirs from a DaemonSet instead (see the kube_metrics role) so that the
+# cluster schedules and restarts them like anything else in it.
+#
+# Installed as a binary + systemd unit rather than a container: nginx-proxy and
+# the k8s nodes have no docker (the cluster runs containerd directly), and a
+# 20MB static Go binary needs no runtime at all.
+
+- name: Remove node_exporter
+  when: observability_state == 'absent'
+  block:
+    - name: Stop and disable node_exporter
+      ansible.builtin.systemd:
+        name: node_exporter
+        state: stopped
+        enabled: false
+      become: true
+      failed_when: false        # never installed is a success for "absent"
+
+    - name: Remove node_exporter files
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      become: true
+      loop:
+        - /etc/systemd/system/node_exporter.service
+        - "{{ node_exporter_bin }}"
+        - "{{ node_exporter_textfile_dir }}"
+
+    - name: Reload systemd after removing the unit
+      ansible.builtin.systemd:
+        daemon_reload: true
+      become: true
+
+- name: Install node_exporter
+  when: observability_state == 'present'
+  block:
+    # aarch64 here, but resolved rather than hardcoded: the same role has to
+    # work on the reference Linux host, which is x86_64.
+    - name: Map the machine architecture to a release architecture
+      ansible.builtin.set_fact:
+        node_exporter_arch: >-
+          {{ {'aarch64': 'arm64', 'arm64': 'arm64',
+              'x86_64': 'amd64', 'amd64': 'amd64'}[ansible_facts['architecture']] }}
+
+    - name: Fail clearly on an architecture with no published build
+      ansible.builtin.fail:
+        msg: >-
+          No node_exporter release for architecture
+          {{ ansible_facts['architecture'] }} on {{ inventory_hostname }}.
+      when: node_exporter_arch is not defined or node_exporter_arch == ''
+
+    - name: Check the installed version
+      ansible.builtin.command: "{{ node_exporter_bin }} --version"
+      register: ne_installed
+      changed_when: false
+      failed_when: false
+
+    # Downloading 20MB on every run would make this role slow and noisy for no
+    # reason; the version string is the only thing that decides a reinstall.
+    - name: Install the node_exporter binary
+      when: node_exporter_version not in (ne_installed.stdout | default('')) 
+      become: true
+      block:
+        - name: Download the node_exporter release
+          ansible.builtin.get_url:
+            url: >-
+              {{ node_exporter_base_url }}/v{{ node_exporter_version }}/node_exporter-{{ node_exporter_version }}.linux-{{ node_exporter_arch }}.tar.gz
+            dest: /tmp/node_exporter.tar.gz
+            mode: "0644"
+            timeout: 60
+
+        - name: Unpack the binary into place
+          ansible.builtin.unarchive:
+            src: /tmp/node_exporter.tar.gz
+            dest: /usr/local/bin
+            remote_src: true
+            extra_opts:
+              - --strip-components=1
+              - "node_exporter-{{ node_exporter_version }}.linux-{{ node_exporter_arch }}/node_exporter"
+            owner: root
+            group: root
+            mode: "0755"
+          notify: restart node_exporter
+
+        - name: Remove the downloaded archive
+          ansible.builtin.file:
+            path: /tmp/node_exporter.tar.gz
+            state: absent
+
+    - name: Create the node_exporter system user
+      ansible.builtin.user:
+        name: "{{ node_exporter_user }}"
+        system: true
+        shell: /usr/sbin/nologin
+        create_home: false
+      become: true
+
+    - name: Create the textfile collector directory
+      ansible.builtin.file:
+        path: "{{ node_exporter_textfile_dir }}"
+        state: directory
+        owner: "{{ node_exporter_user }}"
+        group: "{{ node_exporter_user }}"
+        mode: "0755"
+      become: true
+
+    - name: Install the node_exporter unit
+      ansible.builtin.template:
+        src: node_exporter.service.j2
+        dest: /etc/systemd/system/node_exporter.service
+        owner: root
+        group: root
+        mode: "0644"
+      become: true
+      notify: restart node_exporter
+
+    - name: Enable and start node_exporter
+      ansible.builtin.systemd:
+        name: node_exporter
+        state: started
+        enabled: true
+        daemon_reload: true
+      become: true
+
+    # Proves the scrape endpoint actually answers, which is the only thing
+    # Prometheus cares about. A unit that is "active" but bound to the wrong
+    # address still shows up as a dead target.
+    - name: Verify the metrics endpoint responds
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ node_exporter_port }}/metrics"
+        return_content: false
+        status_code: 200
+      register: ne_probe
+      retries: 6
+      delay: 5
+      until: ne_probe is succeeded

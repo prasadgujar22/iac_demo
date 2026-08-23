@@ -1,0 +1,109 @@
+---
+- name: Remove the Oracle metrics collector
+  when: observability_state == 'absent'
+  block:
+    - name: Stop and disable the collector timer
+      ansible.builtin.systemd:
+        name: "{{ item }}"
+        state: stopped
+        enabled: false
+      become: true
+      failed_when: false
+      loop:
+        - oracle_metrics.timer
+        - oracle_metrics.service
+
+    - name: Remove collector files
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      become: true
+      loop:
+        - /etc/systemd/system/oracle_metrics.timer
+        - /etc/systemd/system/oracle_metrics.service
+        - "{{ oracle_metrics_script }}"
+        # Left behind, this file would keep serving the last values it held --
+        # metrics frozen in time, which reads as a healthy database.
+        - "{{ node_exporter_textfile_dir }}/oracle.prom"
+
+    - name: Reload systemd after removing the units
+      ansible.builtin.systemd:
+        daemon_reload: true
+      become: true
+
+- name: Install the Oracle metrics collector
+  when: observability_state == 'present'
+  block:
+    # Normally created by the node_exporter role, which runs first on this host.
+    # Declared here too so the role stands on its own.
+    - name: Ensure the textfile collector directory exists
+      ansible.builtin.file:
+        path: "{{ node_exporter_textfile_dir }}"
+        state: directory
+        mode: "0755"
+      become: true
+
+    - name: Install the collector script
+      ansible.builtin.template:
+        src: oracle_metrics.sh.j2
+        dest: "{{ oracle_metrics_script }}"
+        owner: root
+        group: root
+        mode: "0755"
+      become: true
+
+    - name: Install the collector units
+      ansible.builtin.template:
+        src: "{{ item }}.j2"
+        dest: "/etc/systemd/system/{{ item }}"
+        owner: root
+        group: root
+        mode: "0644"
+      become: true
+      loop:
+        - oracle_metrics.service
+        - oracle_metrics.timer
+
+    - name: Enable and start the collector timer
+      ansible.builtin.systemd:
+        name: oracle_metrics.timer
+        state: started
+        enabled: true
+        daemon_reload: true
+      become: true
+
+    # The timer's first run is up to one interval away; force one now so the
+    # verification below has something to read and a broken query fails HERE,
+    # during the deploy, rather than silently 30 seconds later.
+    - name: Run the collector once immediately
+      ansible.builtin.systemd:
+        name: oracle_metrics.service
+        state: started
+      become: true
+
+    - name: Read back the generated metrics
+      ansible.builtin.slurp:
+        src: "{{ node_exporter_textfile_dir }}/oracle.prom"
+      become: true
+      register: oracle_prom
+      retries: 6
+      delay: 5
+      until: oracle_prom is succeeded
+
+    # oracle_up 0 means the file was written but the database could not be
+    # queried -- a real failure that a "file exists" check would call success.
+    - name: Fail if the collector could not reach the database
+      ansible.builtin.fail:
+        msg: >-
+          The Oracle collector ran but could not query the database
+          (oracle_up 0). Check `journalctl -u oracle_metrics` on
+          {{ inventory_hostname }}; the script logs what sqlplus said.
+      when: "'oracle_up 1' not in (oracle_prom.content | b64decode)"
+
+    - name: Report what was collected
+      ansible.builtin.debug:
+        msg: >-
+          Oracle metrics:
+          {{ (oracle_prom.content | b64decode).split('\n')
+             | select('match', '^oracle_(up|sessions_total|app_rows_total)')
+             | list | join(' | ') }}

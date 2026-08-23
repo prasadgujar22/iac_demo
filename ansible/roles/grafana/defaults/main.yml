@@ -1,0 +1,24 @@
+---
+grafana_image: grafana/grafana:13.2.0
+grafana_port: 3000
+
+grafana_config_dir: /etc/grafana
+grafana_dashboard_dir: /var/lib/grafana-dashboards
+grafana_data_dir: /var/lib/grafana
+
+# The image runs as uid 472; the data directory must match or Grafana cannot
+# create its own SQLite database and the container restarts in a loop.
+grafana_uid: 472
+
+grafana_admin_user: admin
+# Overridden by the pipeline from a Jenkins credential. Left as the Grafana
+# default here so a hand-run of the playbook still works; the deploy prints a
+# warning when it is still this value.
+grafana_admin_password: admin
+
+# Where Grafana finds its data. Same VM, so localhost from inside the
+# container's host network view -- see the unit for why this uses the VM's own
+# address instead.
+prometheus_port: 9090
+
+observability_state: present

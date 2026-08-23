@@ -16,7 +16,7 @@ else
 STACKS := 20-wls-k8s 30-nginx-multipass
 endif
 
-.PHONY: help preflight validate init plan infra app verify destroy fmt clean ssh-key import
+.PHONY: help preflight validate init plan infra app verify destroy fmt clean ssh-key import obs obs-destroy
 
 SSH_KEY ?= $(HOME)/.ssh/homelab_iac_ed25519
 
@@ -102,6 +102,17 @@ app-archive: ## Build only the WDT archive packer bakes into the image
 
 verify: ## End-to-end verification incl. session affinity
 	@cd ansible && $(AP) playbooks/site.yml --tags verify -e "db_mode=$(DB_MODE)"
+
+obs: ## Deploy Prometheus + Grafana and the exporters they read
+# The VM itself is a Terraform stack; this target covers the configuration half.
+# `make obs` after the stack exists is idempotent and re-provisions dashboards.
+	@$(TF) -chdir=terraform/40-obs-multipass init -no-color
+	@$(TF) -chdir=terraform/40-obs-multipass apply -auto-approve -no-color
+	@cd ansible && $(AP) playbooks/observability.yml -e observability_state=present
+
+obs-destroy: ## Remove the exporters from every tier and destroy the observability VM
+	@cd ansible && $(AP) playbooks/observability.yml -e observability_state=absent
+	@$(TF) -chdir=terraform/40-obs-multipass destroy -auto-approve -no-color
 
 image: ## Rebuild the WebLogic domain image with Packer
 	@cd packer/wls-domain-image && packer build .

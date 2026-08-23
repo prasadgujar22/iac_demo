@@ -1,0 +1,16 @@
+# Managed by Ansible (grafana role) — local edits are overwritten.
+apiVersion: 1
+
+# A FIXED uid, referenced by every vendored dashboard. Without it Grafana
+# assigns a random uid on first provision and the dashboards -- which name the
+# datasource by uid -- come up empty with "datasource not found".
+datasources:
+  - name: Prometheus
+    uid: homelab-prometheus
+    type: prometheus
+    access: proxy
+    url: http://{{ ansible_host }}:{{ prometheus_port }}
+    isDefault: true
+    editable: false
+    jsonData:
+      timeInterval: {{ prometheus_scrape_interval | default('15s') }}

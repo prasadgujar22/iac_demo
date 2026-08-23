@@ -1,0 +1,18 @@
+---
+# NOTE the org: the project moved from github.com/nginxinc to github.com/nginx.
+# The old path still resolves for the repo but not for release assets, so a URL
+# copied from an older guide 404s at download time.
+nginx_exporter_version: "1.5.3"
+nginx_exporter_base_url: "https://github.com/nginx/nginx-prometheus-exporter/releases/download"
+nginx_exporter_bin: /usr/local/bin/nginx-prometheus-exporter
+nginx_exporter_user: nginx_exporter
+nginx_exporter_port: 9113
+
+# stub_status is bound to loopback: it exposes connection counts for the whole
+# proxy and has no auth, and the exporter that reads it runs on this same VM.
+# Nothing outside needs it -- Prometheus scrapes the EXPORTER, not this.
+nginx_stub_status_addr: "127.0.0.1"
+nginx_stub_status_port: 8081
+nginx_stub_status_path: /stub_status
+
+observability_state: present

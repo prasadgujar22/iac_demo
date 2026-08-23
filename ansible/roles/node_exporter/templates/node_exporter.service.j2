@@ -1,0 +1,26 @@
+# Managed by Ansible (node_exporter role) — local edits are overwritten.
+[Unit]
+Description=Prometheus node exporter
+Documentation=https://github.com/prometheus/node_exporter
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User={{ node_exporter_user }}
+Group={{ node_exporter_user }}
+Type=simple
+ExecStart={{ node_exporter_bin }} \
+  --web.listen-address=:{{ node_exporter_port }} \
+  --collector.textfile.directory={{ node_exporter_textfile_dir }}
+Restart=on-failure
+RestartSec=5
+
+# The exporter reads /proc and /sys and needs nothing else.
+NoNewPrivileges=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths={{ node_exporter_textfile_dir }}
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

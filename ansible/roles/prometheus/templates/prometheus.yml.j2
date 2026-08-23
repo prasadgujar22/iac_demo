@@ -1,0 +1,91 @@
+# Managed by Ansible (prometheus role) — local edits are overwritten.
+global:
+  scrape_interval: {{ prometheus_scrape_interval }}
+  evaluation_interval: {{ prometheus_scrape_interval }}
+  external_labels:
+    homelab: iac
+
+scrape_configs:
+  # Prometheus itself. Cheap, and the first thing to check when the other
+  # targets look wrong -- prometheus_tsdb_* tells you whether the problem is
+  # collection or storage.
+  - job_name: prometheus
+    static_configs:
+      - targets: ['localhost:{{ prometheus_port }}']
+        labels: {tier: observability}
+
+  # Host metrics. The k8s nodes are in this same job on purpose: their
+  # DaemonSet uses hostNetwork on the same port, so a node is a node whether
+  # its exporter arrived by systemd or by Kubernetes.
+  - job_name: node
+    static_configs:
+{% for grp, tier in [('obs', 'observability'), ('db', 'database'), ('nginx', 'proxy')] %}
+{% for h in groups.get(grp, []) %}
+      - targets: ['{{ hostvars[h].ansible_host }}:{{ node_exporter_port }}']
+        labels: {tier: {{ tier }}, vm: {{ h }}}
+{% endfor %}
+{% endfor %}
+{% for ip in hostvars['localhost'].k8s_node_ips | default([]) %}
+      - targets: ['{{ ip }}:{{ node_exporter_port }}']
+        labels: {tier: kubernetes, vm: {{ ip }}}
+{% endfor %}
+
+  # nginx's own counters (connections, requests, and the reading/writing/waiting
+  # split), which host metrics cannot show.
+{% if groups.get('nginx', []) %}
+  - job_name: nginx
+    static_configs:
+{% for h in groups.get('nginx', []) %}
+      - targets: ['{{ hostvars[h].ansible_host }}:{{ nginx_exporter_port }}']
+        labels: {tier: proxy, vm: {{ h }}}
+{% endfor %}
+{% endif %}
+
+{% if hostvars['localhost'].kube_state_metrics_endpoint | default('') %}
+  # The state of Kubernetes objects: deployments, pod phases, restart counts.
+  - job_name: kube-state-metrics
+    static_configs:
+      - targets: ['{{ hostvars['localhost'].kube_state_metrics_endpoint }}']
+        labels: {tier: kubernetes}
+{% endif %}
+
+{% if hostvars['localhost'].k8s_node_ips | default([]) %}
+  # Per-container CPU and memory, straight from each kubelet's cAdvisor. This
+  # is what makes the WebLogic pods visible as pods rather than as an
+  # unattributed lump of node memory.
+  #
+  # https on 10250 with the kubelet's own serving certificate, which is signed
+  # by the cluster CA for the node's name -- not for the IP being dialled --
+  # so verification is skipped deliberately. The traffic stays on the Multipass
+  # network and carries no secrets in either direction.
+  - job_name: kubelet-cadvisor
+    scheme: https
+    metrics_path: /metrics/cadvisor
+    tls_config:
+      insecure_skip_verify: true
+    authorization:
+      type: Bearer
+      credentials_file: {{ prometheus_config_dir }}/k8s-token
+    static_configs:
+      - targets:
+{% for ip in hostvars['localhost'].k8s_node_ips %}
+          - '{{ ip }}:{{ kubelet_port }}'
+{% endfor %}
+        labels: {tier: kubernetes}
+
+  # The kubelet's own health and capacity metrics, from the same endpoint.
+  - job_name: kubelet
+    scheme: https
+    metrics_path: /metrics
+    tls_config:
+      insecure_skip_verify: true
+    authorization:
+      type: Bearer
+      credentials_file: {{ prometheus_config_dir }}/k8s-token
+    static_configs:
+      - targets:
+{% for ip in hostvars['localhost'].k8s_node_ips %}
+          - '{{ ip }}:{{ kubelet_port }}'
+{% endfor %}
+        labels: {tier: kubernetes}
+{% endif %}

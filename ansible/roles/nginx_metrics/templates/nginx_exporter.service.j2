@@ -1,0 +1,24 @@
+# Managed by Ansible (nginx_metrics role) — local edits are overwritten.
+[Unit]
+Description=Prometheus exporter for nginx stub_status
+Documentation=https://github.com/nginx/nginx-prometheus-exporter
+After=network-online.target nginx.service
+Wants=network-online.target
+
+[Service]
+User={{ nginx_exporter_user }}
+Group={{ nginx_exporter_user }}
+Type=simple
+ExecStart={{ nginx_exporter_bin }} \
+  --nginx.scrape-uri=http://{{ nginx_stub_status_addr }}:{{ nginx_stub_status_port }}{{ nginx_stub_status_path }} \
+  --web.listen-address=:{{ nginx_exporter_port }}
+Restart=on-failure
+RestartSec=5
+
+NoNewPrivileges=true
+ProtectHome=true
+ProtectSystem=strict
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

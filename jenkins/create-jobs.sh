@@ -65,6 +65,7 @@ JOBS=(
   "homelab-iac|jenkins/Jenkinsfile|Full infrastructure: starts stopped VMs, preflight, validate, plan, apply (creates whatever tier is missing, including the k8s cluster), configure, deploy, verify"
   "homelab-app|jenkins/Jenkinsfile.app|Application redeploy only: rebuild the WAR, redeploy to ms1+ms2, refresh routing, verify"
   "homelab-teardown|jenkins/Jenkinsfile.teardown|ACTION=DESTROY: destroys every tier in reverse order (requires CONFIRM=DESTROY plus an approval). ACTION=SHUTDOWN: non-destructive, just stops every VM"
+  "homelab-observability|jenkins/Jenkinsfile.observability|ACTION=DEPLOY: creates the observability VM, installs exporters on every tier and brings up Prometheus + Grafana. ACTION=DESTROY (needs CONFIRM=DESTROY): removes the exporters and destroys the VM. Deliberately separate from homelab-iac so monitoring survives a teardown of the tiers it watches"
 )
 
 existing="$(cli list-jobs 2>/dev/null || true)"

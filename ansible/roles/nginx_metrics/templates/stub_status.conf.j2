@@ -1,0 +1,21 @@
+# Managed by Ansible (nginx_metrics role) — local edits are overwritten.
+#
+# Deliberately a conf.d drop-in rather than an addition to wls-proxy.conf: the
+# nginx_proxy role re-templates that file every time verification runs, and
+# anything added there by another role would be silently reverted.
+server {
+    listen {{ nginx_stub_status_addr }}:{{ nginx_stub_status_port }};
+    server_name _;
+
+    access_log off;
+
+    location {{ nginx_stub_status_path }} {
+        stub_status;
+        allow 127.0.0.1;
+        deny all;
+    }
+
+    location / {
+        return 404;
+    }
+}
