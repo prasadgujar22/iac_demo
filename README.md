@@ -41,7 +41,7 @@ Only the LAN entry point needs a bridge, because Multipass VMs are NAT'd.
 | `terraform/30-nginx-multipass/` | Terraform | nginx proxy VM |
 | `terraform/40-obs-multipass/` | Terraform | Observability VM (Prometheus + Grafana) |
 | `ansible/` | Ansible | Oracle XE **container**, app build, socat bridges, nginx config |
-| `jenkins/` | Jenkins | Pipelines: full infra, app-only redeploy, teardown, observability |
+| `jenkins/` | Jenkins | Pipelines: full infra, app-only redeploy, teardown, observability (deploy + teardown) |
 | `app/customer-onboarding/` | Maven | The application, with the fixes described below |
 
 ## The database runs as a CONTAINER on a VM
@@ -293,8 +293,15 @@ altogether — the play header printed with no tasks beneath it.
 ## Observability
 
 Prometheus and Grafana, with dashboards for the proxy, the cluster and the
-database. Deployed and destroyed by `homelab-observability`
-(`ACTION=DEPLOY|DESTROY`), independently of everything else.
+database, on their own VM and their own lifecycle. Two jobs:
+
+| Job | Does |
+|---|---|
+| `homelab-observability` | Creates the VM if absent, installs the exporters on every tier, brings up Prometheus and Grafana. Re-running is a no-op apart from re-provisioning dashboards. |
+| `homelab-observability-teardown` | Removes the exporters, then destroys the VM and all metric history. Requires `CONFIRM=DESTROY`. |
+
+One job per direction, so a destructive action cannot be reached by mistyping a
+parameter on a routine deploy.
 
 ### It runs on its own VM, not in the cluster
 
@@ -438,6 +445,8 @@ make plan              # terraform plan across all stacks (read-only)
 make infra             # provision DB + WLS + nginx
 make app               # build WAR, bake it into a new domain image
 make verify            # end-to-end assertions incl. session affinity
+make obs               # deploy Prometheus + Grafana and the exporters
+make obs-destroy       # remove the exporters, then destroy the observability VM
 ```
 
 `make ssh-key` creates `~/.ssh/homelab_iac_ed25519`, a dedicated keypair injected
@@ -517,10 +526,23 @@ destroy`, where launch parameters are not a sufficient statement of intent.
 That job has its own `AUTO_APPROVE`, scoped to the non-destructive `SHUTDOWN`
 path, and `CONFIRM=DESTROY` for the rest.
 
+`homelab-observability` takes the same `AUTO_APPROVE`, defaulting the same way.
+`homelab-observability-teardown` deliberately has no such flag: it is gated by
+`CONFIRM=DESTROY`, and a destructive action should require typing something.
+
 > Jenkins **drops a parameter its stored job config does not know yet**, so a
 > newly added one is absent from the first build after it appears — the job
 > learns parameters from the `Jenkinsfile` only once it has run with them. The
 > `parameters {}` default still applies during that run.
+>
+> The same state has a sharper edge. A build whose job config declares **no**
+> parameters — every job immediately after `jenkins/create-jobs.sh` rewrites it,
+> which is exactly when that script tells you to run each job once — resolves
+> `params.X` from the `Jenkinsfile` normally, so `when` conditions evaluate as
+> usual, but Jenkins injects **no matching environment variables**. A shell step
+> running under `set -u` then dies on `DB_MODE: unbound variable`, in a stage
+> that has nothing to do with the cause. Every shell reference to a parameter
+> therefore carries the same default its declaration does.
 
 ### Jenkins credentials the pipelines expect
 
@@ -529,6 +551,12 @@ path, and `CONFIRM=DESTROY` for the rest.
 | `oracle-sys` | username/password | Oracle `SYS` |
 | `oracle-app` | username/password | Application schema (`customer_app`) |
 | `wls-admin` | username/password | WebLogic administrator |
+| `grafana-admin` | username/password | Grafana login, used by `homelab-observability` |
+
+The observability pipeline binds `grafana-admin` through `withCredentials`
+rather than taking a build parameter, so the password is masked in the console
+log — Jenkins echoes the `sh` script it runs, and a parameter would appear there
+in clear text.
 
 ### Shell steps need an explicit bash shebang
 
