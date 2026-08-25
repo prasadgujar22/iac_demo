@@ -241,6 +241,18 @@ Two things to know about the `db_url` variable:
   stack. A remote-state read would make *planning* this stack depend on the db
   stack's state already existing — exactly the plan-time coupling that has
   deadlocked from-scratch bootstraps in this pipeline before.
+- **The db stack must therefore be *applied* before this one is *planned*.**
+  Reading `jdbc_url` from a stack that has only been planned returns nothing,
+  and "nothing" is indistinguishable from `h2` mode: `DB_URL` is quietly not
+  injected and the app falls back to the address baked into `web.xml`. Build
+  #50 hit exactly this on a from-scratch run after a teardown — every stack
+  planned first, then applied, so at plan time the database did not yet exist.
+  It went green all the way to `Verify`, where the dashboard returned
+  `ORA-17820` against a healthy cluster. `05-k8s-multipass` and
+  `10-db-multipass` are now planned and applied together as a **foundation
+  tier** ahead of `Build domain image`, for the same class of reason the k8s
+  stack already was: both the image build and the main `Plan` stage consume the
+  database's address, and both run before the main `Apply`.
 
 Changing `db_url` rolls the domain, which is precisely how the new address
 reaches the running application.
@@ -517,7 +529,7 @@ user Jenkins actually runs as on your host.
 stages are skipped when it is set. Starting a build already means choosing
 `APPLY`, `DB_MODE`, `BUILD_IMAGE` and `DEPLOY_APP` — the prompts only re-asked
 what was just selected, and each carried a 15-minute timeout, so a build nobody
-was watching could abort with the k8s tier applied and nothing after it.
+was watching could abort with the foundation tier applied and nothing after it.
 
 Uncheck `AUTO_APPROVE` to get the plan-by-plan review back.
 

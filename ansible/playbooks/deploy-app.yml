@@ -28,15 +28,34 @@
         db_tf: "{{ lookup('ansible.builtin.file', db_inv.stat.path) | from_yaml }}"
       when: db_inv.stat.exists
 
-    - name: Fall back to the shared Terraform state for the database host
-      # The generated inventory only exists in the workspace that ran `apply`.
-      # The app-redeploy job has its OWN workspace, so the file is absent there,
-      # the host silently resolved to '', and the rendered JDBC URL pointed at
-      # localhost — breaking a working deployment with
-      #   ORA-12541: Cannot connect. No listener at host localhost port 1521
+    - name: Read the database host from the stack's shared Terraform state
+      # AUTHORITATIVE, and queried unconditionally -- NOT merely as a fallback
+      # for a missing inventory file.
       #
-      # The shared state backend is authoritative and visible to every job, so
-      # query it whenever the inventory file is missing.
+      # The two sources have different lifetimes, and that is the whole point.
+      # The 10-db stack's backend is a single absolute path shared by every
+      # job, but `local_file.inventory` writes to ${path.module}/.generated/ --
+      # RELATIVE to whichever workspace ran the command. So the homelab-teardown
+      # job's `terraform destroy` empties the shared state (correct, globally)
+      # while deleting only its OWN copy of the inventory: homelab-iac's copy
+      # survives, still naming a VM that no longer exists. Preferring the file
+      # therefore means confidently resolving a DEAD address, with the assert
+      # below reporting success.
+      #
+      # Build #50 is the failure that shape produces. It templated
+      # 192.168.252.28 -- a leftover from before the previous night's teardown
+      # -- into the image's web.xml, while the rebuilt database had come up at
+      # 192.168.252.36. Everything went green until Verify, where the dashboard
+      # came back with ORA-17820.
+      #
+      # State is shared across workspaces, which is also the original reason
+      # this lookup exists (the app-redeploy job has its own workspace, where
+      # the inventory file has never existed at all). The generated inventory
+      # stays on as the fallback for when state cannot be read.
+      #
+      # `init` first: a workspace that never initialised this stack fails with
+      # "Backend initialization required" on `output` alone. -reconfigure
+      # because the shared backend is authoritative.
       ansible.builtin.shell:
         cmd: >-
           terraform -chdir={{ repo_root }}/terraform/10-db-multipass
@@ -49,18 +68,18 @@
       register: db_host_tf
       changed_when: false
       failed_when: false
-      when: not db_inv.stat.exists
 
-    - name: Derive the database host from the Terraform-generated inventory
-      # The expression must be self-guarding: Ansible finalizes set_fact args
-      # BEFORE evaluating `when`, so a `when` guard does not prevent an
-      # undefined-variable error inside the template.
+    - name: Derive the database host, preferring Terraform state over the generated inventory
+      # State first, inventory file second. The expression must be
+      # self-guarding: Ansible finalizes set_fact args BEFORE evaluating
+      # `when`, so a `when` guard does not prevent an undefined-variable
+      # error inside the template.
       ansible.builtin.set_fact:
         oracle_db_host: >-
-          {{ (db_tf | default({}, true))
-             | community.general.json_query('db.hosts.*.ansible_host')
-             | default([], true) | first
-             | default(((db_host_tf | default({})).stdout | default('', true)) | trim, true)
+          {{ ((db_host_tf | default({})).stdout | default('', true) | trim)
+             | default((db_tf | default({}, true))
+                       | community.general.json_query('db.hosts.*.ansible_host')
+                       | default([], true) | first | default('', true), true)
              | default(oracle_db_host | default(''), true) }}
 
     - name: Require a usable database host in oracle mode

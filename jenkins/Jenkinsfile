@@ -161,8 +161,8 @@ set -uo pipefail
                                 # Log every attempt: a silent five-minute gap
                                 # in the console is indistinguishable from a
                                 # hang, and was taken for one. Keep the wait
-                                # short when APPLY=true -- "Apply k8s tier"
-                                # later in this same build is what repairs an
+                                # short when APPLY=true -- "Apply foundation
+                                # tier" later in this same build is what repairs an
                                 # incomplete cluster or a stale kubeconfig, so
                                 # sitting out the full window buys nothing.
                                 # --request-timeout is not optional here: against
@@ -248,6 +248,100 @@ set -euo pipefail
             }
         }
 
+        stage('Plan foundation tier') {
+            steps {
+                // The foundation tier (k8s cluster + database VM) is planned
+                // and applied on its own, ahead of everything else, because
+                // two later stages need it ALREADY LIVE -- not merely planned:
+                //
+                //   05-k8s-multipass: 20-wls-k8s's kubernetes_manifest
+                //   resources need a live, reachable k8s API just to compute a
+                //   PLAN (not only to apply) -- they fetch the CRD's OpenAPI
+                //   schema from the cluster itself. On a from-scratch bootstrap
+                //   (e.g. right after a full teardown) that cluster doesn't
+                //   exist yet, so planning it together with the other stacks
+                //   before any apply has happened fails with "Invalid
+                //   configuration for API client ... dial tcp ... timeout".
+                //
+                //   10-db-multipass: the database's address is an INPUT to two
+                //   things that run before the main Plan/Apply -- 'Build domain
+                //   image' templates it into the WAR's web.xml, and the Plan
+                //   stage reads this stack's jdbc_url output to inject DB_URL
+                //   into the domain's serverPod.env. Build #50 is what this
+                //   ordering exists to prevent: the db stack was still only
+                //   PLANNED when both of those ran, so `terraform output -raw
+                //   jdbc_url` came back empty ("db stack has no jdbc_url yet"),
+                //   no DB_URL reached the pods, and the app fell back to a
+                //   web.xml baked with the PREVIOUS generation's DB address.
+                //   The dashboard failed verify with ORA-17820 against an
+                //   otherwise perfectly healthy stack.
+                //
+                // Applying both here (when APPLY=true) makes the cluster live
+                // and the database address real before either is consumed.
+                sh '''#!/bin/bash
+set -euo pipefail
+                    terraform -chdir=terraform/05-k8s-multipass init -reconfigure -no-color -input=false
+                    terraform -chdir=terraform/05-k8s-multipass plan -no-color -out=tfplan
+                '''
+                // h2 mode has no database VM at all; the stack stays untouched.
+                script {
+                    if (params.DB_MODE == 'oracle') {
+                        sh '''#!/bin/bash
+set -euo pipefail
+                            terraform -chdir=terraform/10-db-multipass init -reconfigure -no-color -input=false
+                            terraform -chdir=terraform/10-db-multipass plan -no-color -out=tfplan
+                        '''
+                    } else {
+                        echo "[plan] DB_MODE=${params.DB_MODE}: skipping 10-db-multipass (no database VM in h2 mode)"
+                    }
+                }
+            }
+        }
+
+        stage('Approve apply — foundation tier') {
+            // Skipped entirely under AUTO_APPROVE: the launch parameters are
+            // the approval. Left in place, for a run you want to inspect
+            // plan-by-plan.
+            when { expression { params.APPLY && !params.AUTO_APPROVE } }
+            steps {
+                script {
+                    timeout(time: 15, unit: 'MINUTES') {
+                        input message: 'Apply the foundation tier (k8s VMs + kubeadm cluster, and the database VM)? Both must exist before the domain image is built or the WebLogic-on-k8s stack is planned.',
+                              ok: 'Apply'
+                    }
+                }
+            }
+        }
+
+        stage('Apply foundation tier') {
+            when { expression { params.APPLY } }
+            // Bounded independently of the 90-minute pipeline timeout: a
+            // from-scratch bootstrap here is three cold VM launches plus a
+            // kubeadm init/join, and a stall used to sit undetected until
+            // the whole pipeline timed out. Terraform's own provisioners are
+            // watchdogged too (see mp_wait in 05-k8s-multipass/main.tf);
+            // this is the outer backstop.
+            options { timeout(time: 45, unit: 'MINUTES') }
+            steps {
+                sh 'terraform -chdir=terraform/05-k8s-multipass apply -no-color tfplan'
+                script {
+                    if (params.DB_MODE == 'oracle') {
+                        sh 'terraform -chdir=terraform/10-db-multipass apply -no-color tfplan'
+                        // Fail here, loudly, rather than let a silently empty
+                        // output become a stale-address failure four stages
+                        // later in Verify (build #50).
+                        def dbUrl = sh(
+                            script: "terraform -chdir=terraform/10-db-multipass output -raw jdbc_url 2>/dev/null || true",
+                            returnStdout: true).trim()
+                        if (!dbUrl) {
+                            error("10-db-multipass applied but exposes no jdbc_url output -- every downstream consumer of the database address (domain image build, DB_URL injection) would silently fall back to a stale one.")
+                        }
+                        echo "[apply] database live at ${dbUrl}"
+                    }
+                }
+            }
+        }
+
         stage('Build domain image') {
             when { expression { params.BUILD_IMAGE } }
             steps {
@@ -302,10 +396,13 @@ set -euo pipefail
                 // the k8s nodes pull with imagePullPolicy: IfNotPresent
                 // from their own containerd, which never hears about it
                 // otherwise. Save it here; it gets distributed to the nodes
-                // by the 'Load domain image onto k8s nodes' stage below,
-                // AFTER 'Apply k8s tier' -- on a from-scratch bootstrap the
-                // nodes don't exist yet at this point in the pipeline, so
-                // `multipass exec` here would have nothing to target.
+                // by the 'Load domain image onto k8s nodes' stage below
+                // rather than here. The nodes do exist by now ('Apply
+                // foundation tier' runs before this stage, so the image build
+                // can read the database's real address), but keeping the two
+                // steps apart means a BUILD_IMAGE-only run -- APPLY=false, no
+                // nodes to push to -- still produces a tar instead of failing
+                // in `multipass exec`.
                 sh '''#!/bin/bash
 set -euo pipefail
                     TAG="wls-domain-image:2.${BUILD_NUMBER}"
@@ -316,61 +413,11 @@ set -euo pipefail
             }
         }
 
-        stage('Plan k8s tier') {
-            steps {
-                // 05-k8s-multipass is planned (and, below, applied) on its own,
-                // ahead of everything else: 20-wls-k8s's kubernetes_manifest
-                // resources need a live, reachable k8s API just to compute a
-                // PLAN (not only to apply) -- they fetch the CRD's OpenAPI
-                // schema from the cluster itself. On a from-scratch bootstrap
-                // (e.g. right after a full teardown) that cluster doesn't
-                // exist yet, so planning it together with the other stacks
-                // before any apply has happened fails with "Invalid
-                // configuration for API client ... dial tcp ... timeout".
-                // Applying this stack first (when APPLY=true) makes the
-                // cluster live before 20-wls-k8s is ever planned.
-                sh '''#!/bin/bash
-set -euo pipefail
-                    terraform -chdir=terraform/05-k8s-multipass init -reconfigure -no-color -input=false
-                    terraform -chdir=terraform/05-k8s-multipass plan -no-color -out=tfplan
-                '''
-            }
-        }
-
-        stage('Approve apply — k8s tier') {
-            // Skipped entirely under AUTO_APPROVE: the launch parameters are
-            // the approval. Left in place, for a run you want to inspect
-            // plan-by-plan.
-            when { expression { params.APPLY && !params.AUTO_APPROVE } }
-            steps {
-                script {
-                    timeout(time: 15, unit: 'MINUTES') {
-                        input message: 'Apply the k8s tier (VMs + kubeadm cluster)? It must exist before the WebLogic-on-k8s stack can even be planned.',
-                              ok: 'Apply'
-                    }
-                }
-            }
-        }
-
-        stage('Apply k8s tier') {
-            when { expression { params.APPLY } }
-            // Bounded independently of the 90-minute pipeline timeout: a
-            // from-scratch bootstrap here is two cold VM launches plus a
-            // kubeadm init/join, and a stall used to sit undetected until
-            // the whole pipeline timed out. Terraform's own provisioners are
-            // watchdogged too (see mp_wait in 05-k8s-multipass/main.tf);
-            // this is the outer backstop.
-            options { timeout(time: 45, unit: 'MINUTES') }
-            steps {
-                sh 'terraform -chdir=terraform/05-k8s-multipass apply -no-color tfplan'
-            }
-        }
-
         stage('Load domain image onto k8s nodes') {
             when { expression { params.BUILD_IMAGE && params.APPLY } }
             steps {
-                // Only reachable once the k8s tier above has actually been
-                // applied, so MASTER_VM/WORKER_VMS (from 'Start VMs') are
+                // Only reachable once the foundation tier above has actually
+                // been applied, so MASTER_VM/WORKER_VMS (from 'Start VMs') are
                 // real, existing instances -- import onto every node's
                 // containerd so 20-wls-k8s's later apply doesn't
                 // ErrImagePull against an image no registry has.
@@ -393,15 +440,16 @@ set -euo pipefail
         stage('Plan') {
             steps {
                 script {
-                    // 10-db is skipped entirely in h2 mode — no database to provision.
-                    def stacks = params.DB_MODE == 'oracle'
-                        ? ['10-db-multipass', '20-wls-k8s', '30-nginx-multipass']
-                        : ['20-wls-k8s', '30-nginx-multipass']
+                    // 05-k8s and 10-db are NOT here: both are planned and
+                    // applied in the foundation tier above, because the
+                    // stages between the two Plan stages consume a live
+                    // cluster and a live database address.
+                    def stacks = ['20-wls-k8s', '30-nginx-multipass']
                     stacks.each { s ->
                         if (s == '20-wls-k8s' && sh(script: 'kubectl cluster-info >/dev/null 2>&1', returnStatus: true) != 0) {
                             // Only reachable here with APPLY=false (a pure dry
-                            // run/preview): the k8s tier above only PLANS in
-                            // that mode, so the cluster never actually comes
+                            // run/preview): the foundation tier above only
+                            // PLANS in that mode, so the cluster never comes
                             // up. Skip this one stack's plan instead of
                             // failing the whole preview -- there's nothing
                             // meaningful to preview against a cluster that
@@ -501,9 +549,9 @@ set -euo pipefail
             when { expression { params.APPLY } }
             steps {
                 script {
-                    def stacks = params.DB_MODE == 'oracle'
-                        ? ['10-db-multipass', '20-wls-k8s', '30-nginx-multipass']
-                        : ['20-wls-k8s', '30-nginx-multipass']
+                    // Mirrors the Plan stage's list exactly -- the foundation
+                    // tier (05-k8s, 10-db) was already applied above.
+                    def stacks = ['20-wls-k8s', '30-nginx-multipass']
                     stacks.each { s ->
                         sh "terraform -chdir=terraform/${s} apply -no-color tfplan"
                     }
