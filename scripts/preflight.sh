@@ -79,6 +79,46 @@ if command -v multipass >/dev/null 2>&1; then
     fi
 fi
 
+hdr "Docker (domain image build)"
+# Packer's docker builder reaches the daemon through the socket in the CURRENT
+# docker context (on this host: desktop-linux -> ~/.docker/run/docker.sock).
+# `docker info` resolves the context exactly the same way, so it fails in
+# precisely the cases packer would, before anything has been provisioned.
+#
+# Build #53 is why this check exists: Docker Desktop was stopped, and the
+# pipeline only discovered it four minutes in -- after starting VMs, applying
+# the foundation tier (9 resources) and building the WAR -- because the
+# toolchain loop above proves `packer` is on PATH but says nothing about the
+# daemon it talks to.
+#
+# BUILD_IMAGE is the pipeline's own boolean parameter and gates the "Build
+# domain image" stage, so a BUILD_IMAGE=false run never invokes docker and must
+# not be blocked for a daemon it will never use -- the same reasoning that
+# makes lxc/socat warnings above. When the variable is absent entirely (the
+# bare-first-run state described in the Jenkinsfile's environment{} block:
+# parameters applied in Groovy, no env injected) it defaults to false, matching
+# the parameter's own default; the build then degrades to the pre-existing
+# behaviour of failing at `packer build` rather than blocking a host that has
+# no docker and never needed one.
+DOCKER_NEEDED=0
+[ "${BUILD_IMAGE:-false}" = "true" ] && DOCKER_NEEDED=1
+docker_bad() { if [ "$DOCKER_NEEDED" -eq 1 ]; then bad "$*"; else warn "$* (only needed when BUILD_IMAGE=true)"; fi; }
+if ! command -v docker >/dev/null 2>&1; then
+    docker_bad "docker missing -- 'packer build' cannot bake the domain image"
+else
+    # Assigning from a command substitution takes that command's exit status,
+    # and `2>&1 >/dev/null` (in this order) captures stderr while discarding
+    # stdout -- so a failure keeps the daemon's own explanation, which
+    # distinguishes a stopped daemon from a permissions or TLS fault. It is
+    # reported in full (only folded onto one line): truncating it cut the
+    # message mid-word, and the endpoint it names is the whole diagnostic.
+    if DOCKER_ERR=$(docker info 2>&1 >/dev/null); then
+        ok "docker daemon responding (context: $(docker context show 2>/dev/null || echo default))"
+    else
+        docker_bad "docker daemon not responding -- start Docker Desktop and re-run [$(printf '%s' "$DOCKER_ERR" | tr '\n' ' ')]"
+    fi
+fi
+
 hdr "Kubernetes (WebLogic tier)"
 # MASTER_VM is exported by the Jenkinsfile's "Start VMs" stage (the k8s
 # control-plane VM name from terraform var.master_name); empty when run
